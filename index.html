@@ -1,1 +1,213 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Vine Stock</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#111111"/>
+  <style>
+    body{font-family:system-ui;margin:14px;max-width:760px}
+    h2{margin-top:0}
+    .card{border:1px solid #ddd;border-radius:14px;padding:14px;margin:12px 0}
+    .row{display:flex;gap:8px;flex-wrap:wrap}
+    input,select,button{font-size:16px;padding:10px}
+    button{cursor:pointer}
+    .muted{color:#666;font-size:14px}
+    table{width:100%;border-collapse:collapse}
+    td,th{border-bottom:1px solid #eee;padding:8px}
+    .ok{color:#0a7}
+    .warn{color:#b60}
+  </style>
+</head>
+<body>
 
+<h2>📦 Vine Stock</h2>
+
+<div class="card">
+  <div class="row">
+    <button id="btnScan">📷 Scanner</button>
+    <input id="asin" placeholder="ASIN (10 caractères)" />
+    <input id="caisse" placeholder="Caisse (ex: A3)" />
+  </div>
+  <div class="row" style="margin-top:8px">
+    <select id="action">
+      <option value="ADD">ADD (ranger)</option>
+      <option value="REMOVE">REMOVE</option>
+      <option value="MOVE">MOVE</option>
+      <option value="SOLD">SOLD</option>
+    </select>
+    <button id="btnSave">✅ Enregistrer</button>
+  </div>
+  <div class="muted">Caisse proposée = dernière caisse utilisée (globale).</div>
+</div>
+
+<div class="card">
+  <h3>🔁 Synchronisation</h3>
+  <div class="row">
+    <input id="apiUrl" placeholder="URL Apps Script /exec" style="flex:1"/>
+    <input id="secret" placeholder="SECRET"/>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button id="btnSync">Sync Google Sheets</button>
+    <button id="btnExport">Export CSV</button>
+  </div>
+  <div id="status" class="muted">Prêt (offline).</div>
+</div>
+
+<div class="card">
+  <h3>🕓 Historique local</h3>
+  <table>
+    <thead><tr><th>Date</th><th>ASIN</th><th>Caisse</th><th>Action</th></tr></thead>
+    <tbody id="hist"></tbody>
+  </table>
+</div>
+
+<!-- Scanner -->
+<div id="scanBox" style="display:none;position:fixed;inset:0;background:#000c;align-items:center;justify-content:center">
+  <video id="video" autoplay playsinline style="width:90%;max-width:420px;background:#000;border-radius:12px"></video>
+</div>
+
+<script>
+/* PWA */
+if('serviceWorker' in navigator){navigator.serviceWorker.register('sw.js');}
+
+/* IndexedDB */
+const DB='vine_stock', STORE='actions';
+let db,lastCaisse=localStorage.getItem('lastCaisse')||'';
+
+function openDB(){
+  return new Promise((res,rej)=>{
+    const r=indexedDB.open(DB,1);
+    r.onupgradeneeded=()=>r.result.createObjectStore(STORE,{keyPath:'id',autoIncrement:true});
+    r.onsuccess=()=>res(r.result);
+    r.onerror=()=>rej(r.error);
+  });
+}
+function add(row){
+  return new Promise((res,rej)=>{
+    const t=db.transaction(STORE,'readwrite').objectStore(STORE).add(row);
+    t.onsuccess=()=>res();
+    t.onerror=()=>rej();
+  });
+}
+function list(){
+  return new Promise(res=>{
+    const out=[];
+    const c=db.transaction(STORE).objectStore(STORE).openCursor(null,'prev');
+    c.onsuccess=e=>{
+      const cur=e.target.result;
+      if(!cur)return res(out);
+      out.push(cur.value);
+      if(out.length<20)cur.continue();
+      else res(out);
+    };
+  });
+}
+
+/* UI */
+const $=id=>document.getElementById(id);
+$('caisse').value=lastCaisse;
+
+$('btnSave').onclick=async()=>{
+  const asin=$('asin').value.trim().toUpperCase();
+  const caisse=$('caisse').value.trim().toUpperCase();
+  const action=$('action').value;
+  if(!/^[A-Z0-9]{10}$/.test(asin)){alert('ASIN invalide');return;}
+  if(!caisse){alert('Caisse obligatoire');return;}
+
+  lastCaisse=caisse;
+  localStorage.setItem('lastCaisse',caisse);
+
+  await add({
+    ts:new Date().toISOString(),
+    device:localStorage.device||(localStorage.device='phone_'+Math.random().toString(16).slice(2,8)),
+    asin,caisse,action,synced:false
+  });
+  $('status').textContent='✔ Enregistré offline';
+  refresh();
+};
+
+async function refresh(){
+  const rows=await list();
+  $('hist').innerHTML=rows.map(r=>`
+    <tr>
+      <td>${r.ts.slice(0,16).replace('T',' ')}</td>
+      <td>${r.asin}</td>
+      <td>${r.caisse}</td>
+      <td>${r.action}${r.synced?' ✔':''}</td>
+    </tr>`).join('');
+}
+refresh();
+
+/* Export CSV */
+$('btnExport').onclick=async()=>{
+  const rows=await list();
+  const csv=['ts,device,asin,caisse,action,synced']
+    .concat(rows.map(r=>`${r.ts},${r.device},${r.asin},${r.caisse},${r.action},${r.synced}`))
+    .join('\n');
+  const b=new Blob([csv],{type:'text/csv'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(b);
+  a.download='vine_stock.csv';
+  a.click();
+};
+
+/* Sync */
+$('btnSync').onclick=async()=>{
+  const url=$('apiUrl').value.trim(), secret=$('secret').value.trim();
+  if(!url||!secret){alert('URL + SECRET requis');return;}
+  $('status').textContent='⏳ Sync...';
+  const tx=db.transaction(STORE,'readwrite');
+  const st=tx.objectStore(STORE);
+  const rows=[];
+  st.openCursor().onsuccess=e=>{
+    const c=e.target.result;
+    if(!c){
+      fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({secret,rows})})
+      .then(r=>r.json())
+      .then(j=>{
+        if(j.ok){
+          rows.forEach(r=>{r.synced=true;st.put(r);});
+          $('status').textContent='✅ Sync OK';
+          refresh();
+        }else $('status').textContent='❌ Sync refusé';
+      }).catch(()=>{$('status').textContent='❌ Pas de réseau';});
+      return;
+    }
+    if(!c.value.synced)rows.push(c.value);
+    c.continue();
+  };
+};
+
+/* Scanner caméra */
+let stream,detector;
+$('btnScan').onclick=async()=>{
+  if(!('BarcodeDetector'in window)){alert('Scanner non supporté');return;}
+  detector=new BarcodeDetector({formats:['code_128','qr_code','ean_13']});
+  $('scanBox').style.display='flex';
+  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});
+  $('video').srcObject=stream;
+  scan();
+};
+async function scan(){
+  const v=$('video');
+  const codes=await detector.detect(v);
+  if(codes[0]){
+    const val=codes[0].rawValue.trim().toUpperCase();
+    if(/^[A-Z0-9]{10}$/.test(val)){
+      $('asin').value=val;
+      stopScan();
+      return;
+    }
+  }
+  requestAnimationFrame(scan);
+}
+function stopScan(){
+  $('scanBox').style.display='none';
+  if(stream)stream.getTracks().forEach(t=>t.stop());
+}
+</script>
+</body>
+</html>
