@@ -730,5 +730,51 @@ setInterval(()=>{ if(online()) autoSync(); }, 45000);
   }
 })();
 </script>
+  <script>
+(function () {
+
+  function findFnskuInput() {
+    // 1️⃣ priorité au placeholder FNSKU
+    let el = [...document.querySelectorAll('input')]
+      .find(i =>
+        i.placeholder &&
+        i.placeholder.toLowerCase().includes('fnsku')
+      );
+
+    if (el) return el;
+
+    // 2️⃣ fallback : premier input texte visible
+    el = [...document.querySelectorAll('input[type="text"]')]
+      .find(i => i.offsetParent !== null);
+
+    return el || null;
+  }
+
+  function focusAndSelect() {
+    const input = findFnskuInput();
+    if (!input) return;
+
+    // petit délai pour Android / PWA
+    setTimeout(() => {
+      input.focus();
+      input.select();
+    }, 80);
+  }
+
+  // 🔁 quand on revient depuis une autre app (Binary Eye)
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      focusAndSelect();
+    }
+  });
+
+  // 🔁 au retour arrière Android
+  window.addEventListener('pageshow', focusAndSelect);
+
+  // 🔁 premier chargement
+  window.addEventListener('load', focusAndSelect);
+
+})();
+</script>
 </body>
 </html>
