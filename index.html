@@ -345,20 +345,32 @@ function getLastOrderTimestamp(product){
 }
 
 function prodHTML(p){
-(p){
-  const img = p.photo_url ? `<img src="${p.photo_url}" alt="">` : `<div class="ph">📦</div>`;
+  const img = p.photo_url
+    ? `<img src="${p.photo_url}" alt="">`
+    : `<div class="ph">📦</div>`;
+
   const price = p.price ? ` · <b>${p.price}</b>` : '';
-  // Comptes + date JJ/MM (Option A: 1ère date par compte)
-  const acc = accountsWithFirstOrderDate(p.history||[]);
-  const cnt = acc.length ? ` · 👤 ${acc.length} comptes: ${acc.join(' · ')}` : '';
+
+  // Comptes + date JJ/MM
+  const acc = accountsWithFirstOrderDate(p.history || []);
+  const cnt = acc.length
+    ? ` · 👤 ${acc.length} comptes: ${acc.join(' · ')}`
+    : '';
+
   return `
     ${img}
     <div>
-      <h4>${escapeHtml(p.title||'')}</h4>
-      <div class="meta">ASIN: <b>${p.asin}</b>${price}${cnt}</div>
-      <div class="meta">${p.product_url ? `<a href="${p.product_url}" target="_blank">Lien produit</a>` : ''}</div>
-    </div>`;
+      <h4>${escapeHtml(p.title || '')}</h4>
+      <div class="meta">
+        ASIN: <b>${p.asin}</b>${price}${cnt}
+      </div>
+      <div class="meta">
+        ${p.product_url ? `<a href="${p.product_url}" target="_blank">Lien produit</a>` : ''}
+      </div>
+    </div>
+  `;
 }
+
 function escapeHtml(s){
   return (s||'').toString().replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;' }[m]));
 }
