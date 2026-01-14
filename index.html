@@ -279,52 +279,162 @@ function rowsToObjects(rows){
   return out;
 }
 
-async function fetchCSV(url){
-  const r = await fetch(url, {cache:"no-store"});
-  if(!r.ok) throw new Error("HTTP "+r.status);
-  const t = await r.text();
-  return rowsToObjects(parseCSV(t));
+// ---- V5: fetch ultra-robuste (429/5xx + timeout + cache-buster) ----
+async function fetchTextWithRetry(url, {timeoutMs=15000, maxRetries=4} = {}) {
+  let attempt = 0;
+  let lastErr = null;
+
+  // Cache-buster pour éviter le cache agressif (et éviter "rien à sync" si la ressource est la même)
+  const u = new URL(url, location.href);
+  u.searchParams.set("_ts", String(Date.now()));
+
+  while (attempt <= maxRetries) {
+    const controller = new AbortController();
+    const t = setTimeout(()=>controller.abort(), timeoutMs);
+
+    try {
+      const res = await fetch(u.toString(), {
+        method: "GET",
+        cache: "no-store",
+        credentials: "omit",
+        signal: controller.signal,
+        headers: { "Accept": "text/csv,text/plain,*/*" }
+      });
+
+      // 429 / 5xx => retry
+      if (!res.ok) {
+        const status = res.status;
+        // Texte court pour debug si besoin
+        const body = await res.text().catch(()=> "");
+        const msg = `HTTP ${status} ${res.statusText}` + (body ? ` :: ${body.slice(0,120)}` : "");
+        const err = new Error(msg);
+        err.status = status;
+
+        if (status === 429 || status === 502 || status === 503 || status === 504) {
+          const retryAfter = res.headers.get("Retry-After");
+          let waitMs = 600 * (2 ** attempt); // 0.6s, 1.2s, 2.4s, ...
+          if (retryAfter) {
+            const ra = Number(retryAfter);
+            if (!Number.isNaN(ra) && ra > 0) waitMs = Math.max(waitMs, ra * 1000);
+          }
+          // petit jitter
+          waitMs += Math.floor(Math.random()*250);
+          lastErr = err;
+          attempt++;
+          clearTimeout(t);
+          if (attempt > maxRetries) break;
+          await new Promise(r=>setTimeout(r, waitMs));
+          continue;
+        }
+
+        throw err;
+      }
+
+      const text = await res.text();
+      clearTimeout(t);
+      return text;
+
+    } catch (e) {
+      clearTimeout(t);
+
+      // Abort/Network -> retry
+      const isAbort = (e && (e.name === "AbortError"));
+      const isNetwork = (e && (String(e.message||"").includes("Failed to fetch") || String(e.message||"").includes("NetworkError")));
+      if ((isAbort || isNetwork) && attempt < maxRetries) {
+        const waitMs = 500 * (2 ** attempt) + Math.floor(Math.random()*250);
+        lastErr = e;
+        attempt++;
+        await new Promise(r=>setTimeout(r, waitMs));
+        continue;
+      }
+
+      throw e;
+    }
+  }
+
+  throw lastErr || new Error("Échec du fetch (retry épuisés).");
+}
+
+async function fetchCSV(url) {
+  if (!url) throw new Error("URL CSV manquante.");
+  const text = await fetchTextWithRetry(url, {timeoutMs: 18000, maxRetries: 4});
+  const rows = parseCSV(text);
+  return rowsToObjects(rows);
 }
 
 /* ---------- Pull base + mapping ---------- */
 async function pullBaseAndMapping(){
   const s = getSettings();
-  if(!s.baseCsv || !s.mapCsv){
-    toast("⚠️ Mets les URLs CSV dans Réglages");
+  if (!s.baseCsvUrl || !s.mappingCsvUrl){
+    toast("⚠️ Renseigne les 2 URLs CSV (Base + Mapping) dans Réglages.", "warn");
     return;
   }
-  el("btnPullNow").disabled = true;
+
+  // Anti-spam : évite de marteler Google (429)
+  const now = Date.now();
+  const last = Number(localStorage.getItem("vine_last_pull_ms") || "0");
+  const COOLDOWN_MS = 15000; // 15s
+  if (now - last < COOLDOWN_MS){
+    const sec = Math.ceil((COOLDOWN_MS - (now-last))/1000);
+    toast(`⏳ Patiente ${sec}s (anti-429)`, "info");
+    return;
+  }
+  localStorage.setItem("vine_last_pull_ms", String(now));
+
+  const btnPull = el("btnPullNow");
+  if (btnPull) btnPull.disabled = true;
+
   try{
-    toast("⏬ Téléchargement CSV…", 1200);
-    const [baseRows, mapRows] = await Promise.all([fetchCSV(s.baseCsv), fetchCSV(s.mapCsv)]);
-    // baseRows: attendu colonnes: asin,title,photo_url,product_url,price,orders_count,history...
-    setBase(baseRows);
-    // mapRows: attendu colonnes: fnsku,asin (et éventuellement accounts / dates)
-    const map = {};
-    for(const r of mapRows){
-      const fnsku = (r.fnsku || r.FNSKU || "").trim();
-      const asin  = (r.asin  || r.ASIN  || "").trim();
-      if(!fnsku) continue;
-      map[fnsku] = {
-        fnsku,
-        asin,
-        title: r.title || r.TITLE || "",
-        photo_url: r.photo_url || r.photo || "",
-        product_url: r.product_url || r.url || "",
-        price: r.price || "",
-        accounts: parseAccountsField(r.accounts || r.comptes || r.account || "")
-      };
+    toast("📥 Pull Base + Mapping…", "info");
+
+    // On garde une sauvegarde pour ne jamais "vider" si Google renvoie un CSV vide
+    const prevBase = JSON.parse(localStorage.getItem("vine_base_cache") || "[]");
+    const prevMap  = JSON.parse(localStorage.getItem("vine_mapping_cache") || "[]");
+
+    const [base, mapping] = await Promise.all([
+      fetchCSV(s.baseCsvUrl),
+      fetchCSV(s.mappingCsvUrl)
+    ]);
+
+    // Tolérance : si un CSV revient vide (rate limit / bug), on conserve l'ancien cache
+    const baseOk = Array.isArray(base) && base.length > 0;
+    const mapOk  = Array.isArray(mapping) && mapping.length > 0;
+
+    if (!baseOk && prevBase.length){
+      toast("⚠️ Base CSV vide → on garde le cache local.", "warn");
+      BASE_ROWS = prevBase;
+    } else {
+      BASE_ROWS = base;
+      localStorage.setItem("vine_base_cache", JSON.stringify(BASE_ROWS));
     }
-    setMap(map);
+
+    if (!mapOk && prevMap.length){
+      toast("⚠️ Mapping CSV vide → on garde le cache local.", "warn");
+      MAPPING_ROWS = prevMap;
+    } else {
+      MAPPING_ROWS = mapping;
+      localStorage.setItem("vine_mapping_cache", JSON.stringify(MAPPING_ROWS));
+    }
+
+    updateBadges();
+    if (typeof renderAccountFilterOptions === 'function') renderAccountFilterOptions();
+    toast(`✅ Base:${BASE_ROWS.length} | Mapping:${MAPPING_ROWS.length}`, "ok");
+
+    // trace "Dernière sync Google Sheets"
     localStorage.setItem(LS.lastSync, nowHHMM());
-    updateCounts();
-    rebuildAccountFilter();
-    toast("✅ Base + mapping mis à jour");
+    // rafraîchit le badge
+    try{ el("lastSync").textContent = localStorage.getItem(LS.lastSync) || "—"; }catch(_){ }
+
   }catch(e){
+    const msg = String(e && e.message ? e.message : e);
+    if (msg.includes("HTTP 429")){
+      toast("❌ Pull impossible (429). Réessaie dans 30s.", "err");
+    } else {
+      toast("❌ Pull impossible (URL / réseau ?)", "err");
+    }
     console.error(e);
-    toast("❌ Pull impossible (429/URL?)");
   }finally{
-    el("btnPullNow").disabled = false;
+    if (btnPull) btnPull.disabled = false;
   }
 }
 
