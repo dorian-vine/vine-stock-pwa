@@ -356,10 +356,142 @@ async function fetchTextWithRetry(url, {timeoutMs=15000, maxRetries=4} = {}) {
 }
 
 async function fetchCSV(url) {
-  if (!url) throw new Error("URL CSV manquante.");
-  const text = await fetchTextWithRetry(url, {timeoutMs: 18000, maxRetries: 4});
+  // Backward compatible: now smart-detects common Google Sheets "wrong gid / wrong tab" issues.
+  return fetchCSVSmart("generic", url);
+}
+
+function looksLikeHtml(text) {
+  const t = (text || "").trim().slice(0, 200).toLowerCase();
+  return t.startsWith("<!doctype") || t.startsWith("<html") || t.includes("<head") || t.includes("<body");
+}
+
+function normalizeGSheetUrl(url) {
+  if (!url) return url;
+  let u = url.trim();
+  // If user pasted pubhtml, try convert to output=csv
+  if (u.includes("/pubhtml")) {
+    u = u.replace("/pubhtml", "/pub");
+    if (!/output=csv/.test(u)) {
+      u += (u.includes("?") ? "&" : "?") + "output=csv";
+    }
+  }
+  return u;
+}
+
+function buildCandidateWithGid(originalUrl, gid) {
+  let u = originalUrl;
+  if (/([?&])gid=\d+/.test(u)) {
+    u = u.replace(/([?&])gid=\d+/, `$1gid=${gid}`);
+  } else {
+    u += (u.includes("?") ? "&" : "?") + `gid=${gid}`;
+  }
+  if (!/output=csv/.test(u) && u.includes("/pub")) {
+    u += (u.includes("?") ? "&" : "?") + "output=csv";
+  }
+  return u;
+}
+
+function toPubHtmlUrl(csvUrl) {
+  const u = csvUrl.split("#")[0];
+  if (u.includes("/pub?") || u.includes("/pub&") || u.includes("/pubhtml")) {
+    const base = u.replace("/pubhtml", "/pub").replace("/pub?", "/pubhtml?");
+    const parts = base.split("?");
+    const path = parts[0];
+    const qs = parts[1] || "";
+    if (!qs) return path;
+    const kept = qs
+      .split("&")
+      .map(s => s.trim())
+      .filter(Boolean)
+      .filter(kv => !kv.startsWith("output=") && !kv.startsWith("single=") && !kv.startsWith("range="));
+    return kept.length ? `${path}?${kept.join("&")}` : path;
+  }
+  return null;
+}
+
+function validateHeaders(kind, rows) {
+  if (!rows || !rows.length) return { ok: false, reason: "CSV vide" };
+  const header = (rows[0] || []).map(x => String(x || "").trim().toLowerCase());
+  const has = (name) => header.includes(name.toLowerCase());
+  if (kind === "base") {
+    const ok = (has("asin") || has("asins")) && (has("email") || has("delivered_to") || has("account"));
+    return ok ? { ok: true } : { ok: false, reason: "Colonnes base attendues manquantes (asin + email)" };
+  }
+  if (kind === "mapping") {
+    const ok = has("fnsku") && has("asin");
+    return ok ? { ok: true } : { ok: false, reason: "Colonnes mapping attendues manquantes (fnsku + asin)" };
+  }
+  return { ok: true };
+}
+
+async function tryFetchCsvObjects(kind, url, opts = {}) {
+  const text = await fetchTextWithRetry(url, { timeoutMs: opts.timeoutMs ?? 18000, maxRetries: opts.maxRetries ?? 4 });
+  if (looksLikeHtml(text)) {
+    return { ok: false, reason: "URL renvoie du HTML (pas un CSV). Publie la feuille en CSV ou vérifie l'onglet.", url, status: 200 };
+  }
   const rows = parseCSV(text);
-  return rowsToObjects(rows);
+  const v = validateHeaders(kind, rows);
+  if (!v.ok) return { ok: false, reason: v.reason, url, rows };
+  const objs = rowsToObjects(rows);
+  return { ok: true, url, objs, rows };
+}
+
+async function detectGidsFromPubHtml(pubHtmlUrl) {
+  const text = await fetchTextWithRetry(pubHtmlUrl, { timeoutMs: 18000, maxRetries: 2 });
+  const gids = new Set();
+  const re = /[?&]gid=(\d+)/g;
+  let m;
+  while ((m = re.exec(text)) !== null) gids.add(m[1]);
+  return Array.from(gids).map(s => parseInt(s, 10)).filter(n => Number.isFinite(n));
+}
+
+async function fetchCSVSmart(kind, url) {
+  if (!url) throw new Error("URL CSV manquante.");
+  const original = normalizeGSheetUrl(url);
+
+  // First attempt
+  try {
+    const r1 = await tryFetchCsvObjects(kind === "generic" ? "generic" : kind, original);
+    if (r1.ok) return r1.objs;
+  } catch (e) {
+    // Continue to autodetect if possible
+  }
+
+  // Auto-sheet detect only for base/mapping
+  if (kind !== "base" && kind !== "mapping") {
+    const r = await tryFetchCsvObjects("generic", original).catch(err => { throw err; });
+    if (!r.ok) throw new Error(r.reason || "Impossible de lire le CSV.");
+    return r.objs;
+  }
+
+  const cacheKey = kind === "base" ? "DETECTED_GID_BASE" : "DETECTED_GID_MAPPING";
+  const cachedGid = localStorage.getItem(cacheKey);
+  if (cachedGid && /\d+/.test(cachedGid)) {
+    const candidate = buildCandidateWithGid(original, cachedGid);
+    const rc = await tryFetchCsvObjects(kind, candidate, { timeoutMs: 15000, maxRetries: 2 }).catch(() => null);
+    if (rc && rc.ok) return rc.objs;
+  }
+
+  const pubHtml = toPubHtmlUrl(original);
+  if (!pubHtml) {
+    throw new Error("CSV invalide ou vide. Vérifie l'URL CSV (pub?gid=...&output=csv) et que l'onglet est bien publié.");
+  }
+
+  const gids = await detectGidsFromPubHtml(pubHtml).catch(() => []);
+  if (!gids.length) {
+    throw new Error("Impossible de détecter les onglets (gid) sur la page publiée. Vérifie que la feuille est "Publiée sur le Web".");
+  }
+
+  for (const gid of gids) {
+    const candidate = buildCandidateWithGid(original, gid);
+    const r = await tryFetchCsvObjects(kind, candidate, { timeoutMs: 15000, maxRetries: 2 }).catch(() => null);
+    if (r && r.ok) {
+      localStorage.setItem(cacheKey, String(gid));
+      return r.objs;
+    }
+  }
+
+  throw new Error(`CSV vide ou onglet incorrect (${kind}). Vérifie l'URL (gid) ou publie le bon onglet en CSV.`);
 }
 
 /* ---------- Pull base + mapping ---------- */
@@ -392,8 +524,8 @@ async function pullBaseAndMapping(){
     const prevMap  = JSON.parse(localStorage.getItem("vine_mapping_cache") || "[]");
 
     const [base, mapping] = await Promise.all([
-      fetchCSV(s.baseCsvUrl),
-      fetchCSV(s.mappingCsvUrl)
+      fetchCSVSmart('base', s.baseCsvUrl),
+      fetchCSVSmart('mapping', s.mappingCsvUrl)
     ]);
 
     // Tolérance : si un CSV revient vide (rate limit / bug), on conserve l'ancien cache
@@ -429,6 +561,10 @@ async function pullBaseAndMapping(){
     const msg = String(e && e.message ? e.message : e);
     if (msg.includes("HTTP 429")){
       toast("❌ Pull impossible (429). Réessaie dans 30s.", "err");
+    } else if (/csv|onglet|colonn|publi/i.test(msg)) {
+      toast("❌ " + msg, "err");
+    } else if (/csv|onglet|colonn|publi/i.test(msg)) {
+      toast("❌ " + msg, "err");
     } else {
       toast("❌ Pull impossible (URL / réseau ?)", "err");
     }
@@ -459,6 +595,14 @@ async function syncActions(){
   if(!s.scriptUrl || !s.secret){
     toast("⚠️ Mets Apps Script URL + SECRET");
     return;
+  }
+
+  // Message clair si la base/mapping n'ont pas été chargés (souvent URL CSV vide / onglet incorrect)
+  const baseItems = getLocal("baseItems", []);
+  const mappingItems = getLocal("mappingItems", []);
+  if(!baseItems.length || !mappingItems.length){
+    toast("❌ CSV vide ou onglet incorrect (base/mapping). Fais 'Mettre à jour base + mapping' et vérifie les URLs CSV.", "err");
+    // On continue quand même si tu veux pousser des actions existantes, mais au moins le message est clair.
   }
   const actions = getActions();
   if(!actions.length){
