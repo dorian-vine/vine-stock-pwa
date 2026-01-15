@@ -7,15 +7,6 @@
   <link rel="manifest" href="manifest.json">
   <meta name="theme-color" content="#111111"/>
   <style>
-    .badge-caisse{
-  display:inline-block;
-  padding:2px 8px;
-  margin-right:6px;
-  border-radius:10px;
-  background:#f3f4f6;
-  font-size:12px;
-  font-weight:600;
-    }
     body{font-family:system-ui;margin:14px;max-width:880px}
     h2{margin:8px 0 6px}
     .muted{color:#666;font-size:13px}
@@ -261,15 +252,6 @@ function idbPut(store, val){
     tx.oncomplete=()=>res();
     tx.onerror=()=>rej(tx.error);
   });
-}
-function renderCaissesBadges(caisses){
-  if(!Array.isArray(caisses) || caisses.length === 0){
-    return '<span class="muted">—</span>';
-  }
-
-  return caisses
-    .map(c => `<span class="badge-caisse">🧺 ${c}</span>`)
-    .join(' ');
 }
 function idbGet(store, key){
   return new Promise((res,rej)=>{
