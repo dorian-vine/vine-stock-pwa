@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Vine Stock (FNSKU → ASIN)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#f6f7fb;margin:0;padding:16px}
+.card{background:#fff;border-radius:14px;padding:16px;margin-bottom:16px;box-shadow:0 6px 18px rgba(0,0,0,.08)}
+h1,h2{margin:0 0 8px 0}
+button,select,input{font-size:16px;padding:10px 12px;border-radius:10px;border:1px solid #ccc}
+button.primary{background:#111;color:#fff;border:none}
+button.secondary{background:#eee;border:none}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.muted{color:#777;font-size:13px}
+.product{display:flex;gap:12px;margin-top:14px}
+.product img{width:72px;height:72px;object-fit:contain;border-radius:8px;background:#fafafa}
+.badge{background:#eee;border-radius:8px;padding:4px 8px;font-size:12px;margin-right:6px}
+.history{margin-top:6px;font-size:13px;color:#444}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>📦 Vine Stock (FNSKU → ASIN)</h1>
+<div class="muted">Version stable avec filtre par compte</div>
+</div>
+<div class="card">
+<input id="fnskuInput" placeholder="Rechercher ASIN ou titre" style="width:100%;margin-bottom:10px">
+<div class="row">
+<button class="primary" onclick="doSearch()">Chercher</button>
+<button class="secondary" onclick="clearResults()">Effacer</button>
+<button class="secondary" onclick="toggleSettings()">⚙️ Réglages</button>
+</div>
+<div class="row" style="margin-top:12px">
+<label class="muted">Filtre compte</label>
+<select id="accountFilter" onchange="doSearch()">
+<option value="">Tous les comptes</option>
+</select>
+</div>
+<div class="muted" id="statusMsg" style="margin-top:8px"></div>
+</div>
+<div class="card" id="results"></div>
+<script>
+let ALL_PRODUCTS = window.ALL_PRODUCTS || [];
+function $(id){return document.getElementById(id)}
+function aliasFromEmail(email){if(!email)return'';return email.split('@')[0]}
+function formatJJMM(d){if(!d)return'';const x=new Date(d.replace(' ','T'));if(isNaN(x))return'';return String(x.getDate()).padStart(2,'0')+'/'+String(x.getMonth()+1).padStart(2,'0')}
+function lastOrderForAccount(p,a){let m=0;(p.history||[]).forEach(h=>{if(aliasFromEmail(h.email)===a){const t=Date.parse(String(h.order_date||'').replace(' ','T'));if(!isNaN(t)&&t>m)m=t}});return m}
+function extractAccounts(h){const s=new Set();(h||[]).forEach(x=>{if(x.email)s.add(aliasFromEmail(x.email))});return Array.from(s)}
+function doSearch(){
+const q=$('fnskuInput').value.trim().toUpperCase();
+const fa=$('accountFilter').value;
+const r=$('results');r.innerHTML='';$('statusMsg').textContent='';
+if(!ALL_PRODUCTS.length){$('statusMsg').textContent='Aucune donnée chargée.';return}
+if($('accountFilter').options.length===1){
+const s=new Set();ALL_PRODUCTS.forEach(p=>extractAccounts(p.history).forEach(a=>s.add(a)));
+[...s].sort().forEach(a=>{const o=document.createElement('option');o.value=a;o.textContent=a;$('accountFilter').appendChild(o)})
+}
+let f=ALL_PRODUCTS.filter(p=>!q||(p.asin||'').includes(q)||(p.title||'').toUpperCase().includes(q))
+.filter(p=>!fa||extractAccounts(p.history).includes(fa))
+.sort((a,b)=>fa?lastOrderForAccount(b,fa)-lastOrderForAccount(a,fa):0);
+if(!f.length){$('statusMsg').textContent='Aucun résultat.';return}
+f.slice(0,40).forEach(p=>{
+const d=document.createElement('div');d.className='product';
+d.innerHTML=`<img src="${p.photo_url||''}"><div><strong>${p.title||''}</strong><br><span class="badge">${p.asin}</span><span class="badge">${p.orders_count||0} cmd</span><div class="history">${(p.history||[]).map(h=>aliasFromEmail(h.email)+' '+formatJJMM(h.order_date)).join('<br>')}</div></div>`;
+r.appendChild(d)})
+}
+function clearResults(){$('fnskuInput').value='';$('results').innerHTML=''}
+function toggleSettings(){alert('Réglages inchangés')}
+</script>
+</body>
+</html>
