@@ -729,6 +729,11 @@ async function autoSync(){
       if(r && r.pulled){
         $('syncMsg').textContent = `✅ Stock actions mises à jour (+${r.pulled})`;
       }
+      const r = await pullStockActions();
+if(r && r.pulled){
+  await rebuildCaissesFromActions(); // ⬅⬅⬅ ICI
+  $('syncMsg').textContent = ...
+  }
     }catch(e){
       // on n'empêche pas la suite (base + mapping)
       $('syncMsg').textContent = '⚠️ Stock actions: '+(e.message||e);
