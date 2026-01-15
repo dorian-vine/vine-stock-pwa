@@ -1,0 +1,1000 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Vine Stock (FNSKU → ASIN)</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#111827">
+  <style>
+    :root{--bg:#0b1020;--card:#111827;--muted:#94a3b8;--txt:#e5e7eb;--btn:#1f2937;--btn2:#334155;--ok:#16a34a;--bad:#ef4444;}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial,sans-serif;margin:0;background:#f6f7fb;color:#0f172a;}
+    header{padding:16px 16px 0 16px;}
+    h1{margin:0 0 8px 0;font-size:24px;font-weight:800;display:flex;gap:10px;align-items:center}
+    .pill{display:inline-flex;gap:8px;align-items:center;font-size:12px;padding:6px 10px;border-radius:999px;background:#eef2ff;color:#1e293b;border:1px solid #e2e8f0}
+    .row{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
+    .container{max-width:980px;margin:0 auto;padding:16px;}
+    .card{background:#fff;border:1px solid #e2e8f0;border-radius:14px;padding:14px;box-shadow:0 1px 10px rgba(2,6,23,.05)}
+    label{font-size:12px;color:#475569}
+    input,select{width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #cbd5e1;border-radius:12px;font-size:16px;outline:none}
+    input:focus,select:focus{border-color:#6366f1;box-shadow:0 0 0 3px rgba(99,102,241,.15)}
+    button{border:0;border-radius:12px;padding:10px 12px;font-weight:700;background:#111827;color:#fff;cursor:pointer}
+    button.secondary{background:#e2e8f0;color:#111827}
+    button.ghost{background:transparent;color:#111827;border:1px solid #e2e8f0}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    .muted{color:#64748b}
+    .small{font-size:12px}
+    .hr{height:1px;background:#e2e8f0;margin:12px 0}
+    .grid{display:grid;grid-template-columns:1fr;gap:12px}
+    @media(min-width:860px){.grid{grid-template-columns:1.2fr .8fr}}
+    .products{display:grid;gap:10px}
+    .p{display:grid;grid-template-columns:84px 1fr;gap:10px;border:1px solid #e2e8f0;border-radius:14px;padding:10px}
+    .img{width:84px;height:84px;border-radius:12px;background:#f1f5f9;overflow:hidden;display:flex;align-items:center;justify-content:center}
+    .img img{width:100%;height:100%;object-fit:cover}
+    .title{font-weight:800}
+    .meta{font-size:12px;color:#475569;margin-top:4px}
+    .k{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;background:#f1f5f9;padding:2px 6px;border-radius:8px}
+    .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:16px;background:#111827;color:#fff;padding:10px 12px;border-radius:999px;font-weight:700;display:none;z-index:9999}
+    .settings{display:none;margin-top:10px}
+  </style>
+</head>
+<body>
+<header class="container">
+  <h1>📦 Vine Stock (FNSKU → ASIN)</h1>
+  <div class="row">
+    <span class="pill" id="netPill">Réseau : …</span>
+    <span class="pill">Base : <b id="baseCount">0</b></span>
+    <span class="pill">Mapping : <b id="mapCount">0</b></span>
+    <span class="pill">Dernière sync Google Sheets : <b id="lastSync">—</b></span>
+  </div>
+  <div class="small muted">Scan via Binary Eye → reviens ici → le champ est auto-focus + auto-select.</div>
+</header>
+
+<main class="container grid">
+  <section class="card">
+    <h2 style="margin:0 0 10px 0">1) Scanner / coller le FNSKU</h2>
+    <div class="row">
+      <div style="flex:1;min-width:240px">
+        <label>FNSKU</label>
+        <input id="fnskuInput" placeholder="FNSKU (ex: X000QEDMAD)" autocomplete="off" />
+      </div>
+      <div style="display:flex;gap:8px;align-items:end">
+        <button id="btnSearch">Chercher</button>
+        <button id="btnClear" class="secondary">Effacer</button>
+        <button id="btnSettings" class="ghost">⚙️ Réglages</button>
+      </div>
+    </div>
+
+    <div id="settingsBox" class="settings card" style="background:#f8fafc">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+        <h3 style="margin:0">Réglages</h3>
+        <button id="btnCloseSettings" class="secondary">Fermer</button>
+      </div>
+      <div class="hr"></div>
+      <div class="row" style="gap:10px">
+        <div style="flex:1;min-width:260px">
+          <label>Apps Script URL (…/exec)</label>
+          <input id="setScriptUrl" placeholder="https://script.google.com/macros/s/XXXX/exec" />
+        </div>
+        <div style="flex:0.6;min-width:180px">
+          <label>SECRET</label>
+          <input id="setSecret" placeholder="Vine_Secret_2026" />
+        </div>
+      </div>
+      <div class="row" style="gap:10px">
+        <div style="flex:1;min-width:260px">
+          <label>URL CSV Base (output=csv)</label>
+          <input id="setBaseCsv" placeholder="https://docs.google.com/spreadsheets/d/e/.../pub?gid=0&single=true&output=csv" />
+        </div>
+        <div style="flex:1;min-width:260px">
+          <label>URL CSV Mapping (output=csv)</label>
+          <input id="setMapCsv" placeholder="https://docs.google.com/spreadsheets/d/e/.../pub?gid=123&single=true&output=csv" />
+        </div>
+      </div>
+      <div class="row">
+        <button id="btnSaveSettings">Enregistrer</button>
+        <button id="btnResetLocal" class="secondary">Reset cache local</button>
+        <button id="btnExportCsv" class="ghost">Exporter mapping CSV</button>
+      </div>
+      <div class="small muted">Astuce : tes liens “Publier sur le Web” (output=csv) marchent sans auth, idéal pour la PWA.</div>
+    </div>
+
+    <div class="hr"></div>
+
+    <div class="row" style="align-items:end">
+      <div style="flex:1;min-width:220px">
+        <label>Filtre compte</label>
+        <select id="accountFilter">
+          <option value="">Tous les comptes</option>
+        </select>
+      </div>
+      <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap">
+        <button id="btnSyncNow" class="secondary">Sync maintenant</button>
+        <button id="btnPullNow" class="secondary">Mettre à jour base + mapping</button>
+      </div>
+    </div>
+
+    <div class="hr"></div>
+
+    <div id="resultsArea">
+      <div class="muted small">Aucun résultat pour l’instant.</div>
+    </div>
+
+    <div class="row" style="justify-content:center;margin-top:12px">
+      <button id="btnMore" class="ghost" style="display:none">+ 20</button>
+    </div>
+  </section>
+
+  <aside class="card">
+    <h2 style="margin:0 0 10px 0">Dernières actions (local)</h2>
+    <div class="row">
+      <button id="btnClearActions" class="secondary">Vider</button>
+    </div>
+    <div id="actionsArea" class="small muted">—</div>
+  </aside>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ===========================
+   SAFE FINAL (no crashes)
+   - localStorage only (robuste)
+   - CSV pull (base + mapping)
+   - Sync actions -> Apps Script (best-effort)
+   - Search accent-insensitive + filtre compte + tri récent
+   - Affichage comptes + date JJ/MM
+   - Bouton +20
+   =========================== */
+
+const LS = {
+  settings: "vine_settings_v1",
+  base: "vine_base_v1",
+  map: "vine_map_v1",
+  actions: "vine_actions_v1",
+  lastSync: "vine_last_sync_hhmm"
+};
+
+const el = (id)=>document.getElementById(id);
+const toastEl = ()=>el("toast");
+function toast(msg, ms=2200){
+  const t = toastEl();
+  if(!t) return;
+  t.textContent = msg;
+  t.style.display = "block";
+  clearTimeout(toast._to);
+  toast._to = setTimeout(()=>{t.style.display="none";}, ms);
+}
+
+// --- Robust global error reporting (doesn't break UI) ---
+window.addEventListener('error', (e) => {
+  try { toast('⚠️ Erreur JS: ' + (e && e.message ? e.message : 'inconnue')); } catch {}
+});
+window.addEventListener('unhandledrejection', (e) => {
+  try {
+    const r = e && e.reason;
+    const msg = (r && r.message) ? r.message : String(r || 'inconnue');
+    toast('⚠️ Erreur: ' + msg);
+  } catch {}
+});
+
+
+
+function setNetPill(){
+  const online = navigator.onLine;
+  const p = el("netPill");
+  if(!p) return;
+  p.textContent = "Réseau : " + (online ? "ONLINE" : "OFFLINE");
+  p.style.background = online ? "#dcfce7" : "#fee2e2";
+  p.style.color = online ? "#166534" : "#991b1b";
+  p.style.borderColor = online ? "#bbf7d0" : "#fecaca";
+}
+window.addEventListener("online", setNetPill);
+window.addEventListener("offline", setNetPill);
+
+function normalizeStr(s){
+  return (s ?? "")
+    .toString()
+    .toLowerCase()
+    .normalize("NFD").replace(/\p{Diacritic}/gu,"")
+    .replace(/[^a-z0-9]+/g," ")
+    .trim();
+}
+function fmtJJMM(dateStr){
+  // accepte: "2026-01-08 09:54:06" / "2026-01-08" / ISO
+  if(!dateStr) return "";
+  const m = String(dateStr).match(/(\d{4})-(\d{2})-(\d{2})/);
+  if(!m) return "";
+  return m[3] + "/" + m[2];
+}
+function nowHHMM(){
+  const d = new Date();
+  const hh = String(d.getHours()).padStart(2,"0");
+  const mm = String(d.getMinutes()).padStart(2,"0");
+  return hh + ":" + mm;
+}
+function loadJSON(key, fallback){
+  try{
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  }catch(e){ return fallback; }
+}
+function saveJSON(key, val){
+  try{ localStorage.setItem(key, JSON.stringify(val)); }catch(e){}
+}
+
+function getSettings(){
+  return loadJSON(LS.settings, { scriptUrl:"", secret:"", baseCsv:"", mapCsv:"" });
+}
+function setSettings(s){
+  saveJSON(LS.settings, s);
+}
+
+function getBase(){ return loadJSON(LS.base, []); }
+function setBase(rows){ saveJSON(LS.base, rows); }
+function getMap(){ return loadJSON(LS.map, {}); } // fnsku -> {asin, accounts:{email:dateStr}, title, photo_url, product_url, price}
+function setMap(obj){ saveJSON(LS.map, obj); }
+
+function getActions(){ return loadJSON(LS.actions, []); }
+function setActions(rows){ saveJSON(LS.actions, rows); }
+
+function updateCounts(){
+  el("baseCount").textContent = String(getBase().length || 0);
+  el("mapCount").textContent = String(Object.keys(getMap()).length || 0);
+  el("lastSync").textContent = localStorage.getItem(LS.lastSync) || "—";
+}
+
+function focusFNSKU(){
+  const inp = el("fnskuInput");
+  if(!inp) return;
+  inp.focus({preventScroll:true});
+  inp.select();
+}
+document.addEventListener("visibilitychange", ()=>{ if(!document.hidden) setTimeout(focusFNSKU, 120); });
+
+/* ---------- CSV parsing ---------- */
+function parseCSV(text){
+  // parser simple CSV (gère guillemets)
+  const rows = [];
+  let i=0, field="", row=[], inQ=false;
+  const pushField = ()=>{ row.push(field); field=""; };
+  const pushRow = ()=>{ rows.push(row); row=[]; };
+  while(i<text.length){
+    const c = text[i];
+    if(inQ){
+      if(c === '"'){
+        if(text[i+1] === '"'){ field+='"'; i+=2; continue; }
+        inQ=false; i++; continue;
+      }
+      field+=c; i++; continue;
+    }else{
+      if(c === '"'){ inQ=true; i++; continue; }
+      if(c === ','){ pushField(); i++; continue; }
+      if(c === '\n'){ pushField(); pushRow(); i++; continue; }
+      if(c === '\r'){ i++; continue; }
+      field+=c; i++; continue;
+    }
+  }
+  pushField();
+  if(row.length>1 || row[0]!=="" ) pushRow();
+  return rows;
+}
+function rowsToObjects(rows){
+  if(!rows.length) return [];
+  const header = rows[0].map(h=>h.trim());
+  const out=[];
+  for(let r=1;r<rows.length;r++){
+    const obj={};
+    for(let c=0;c<header.length;c++){
+      obj[header[c]] = (rows[r][c] ?? "").trim();
+    }
+    out.push(obj);
+  }
+  return out;
+}
+
+// ---- V5: fetch ultra-robuste (429/5xx + timeout + cache-buster) ----
+async function fetchTextWithRetry(url, {timeoutMs=15000, maxRetries=4} = {}) {
+  let attempt = 0;
+  let lastErr = null;
+
+  // Cache-buster pour éviter le cache agressif (et éviter "rien à sync" si la ressource est la même)
+  const u = new URL(url, location.href);
+  u.searchParams.set("_ts", String(Date.now()));
+
+  while (attempt <= maxRetries) {
+    const controller = new AbortController();
+    const t = setTimeout(()=>controller.abort(), timeoutMs);
+
+    try {
+      const res = await fetch(u.toString(), {
+        method: "GET",
+        cache: "no-store",
+        credentials: "omit",
+        signal: controller.signal,
+        headers: { "Accept": "text/csv,text/plain,*/*" }
+      });
+
+      // 429 / 5xx => retry
+      if (!res.ok) {
+        const status = res.status;
+        // Texte court pour debug si besoin
+        const body = await res.text().catch(()=> "");
+        const msg = `HTTP ${status} ${res.statusText}` + (body ? ` :: ${body.slice(0,120)}` : "");
+        const err = new Error(msg);
+        err.status = status;
+
+        if (status === 429 || status === 502 || status === 503 || status === 504) {
+          const retryAfter = res.headers.get("Retry-After");
+          let waitMs = 600 * (2 ** attempt); // 0.6s, 1.2s, 2.4s, ...
+          if (retryAfter) {
+            const ra = Number(retryAfter);
+            if (!Number.isNaN(ra) && ra > 0) waitMs = Math.max(waitMs, ra * 1000);
+          }
+          // petit jitter
+          waitMs += Math.floor(Math.random()*250);
+          lastErr = err;
+          attempt++;
+          clearTimeout(t);
+          if (attempt > maxRetries) break;
+          await new Promise(r=>setTimeout(r, waitMs));
+          continue;
+        }
+
+        throw err;
+      }
+
+      const text = await res.text();
+      clearTimeout(t);
+      return text;
+
+    } catch (e) {
+      clearTimeout(t);
+
+      // Abort/Network -> retry
+      const isAbort = (e && (e.name === "AbortError"));
+      const isNetwork = (e && (String(e.message||"").includes("Failed to fetch") || String(e.message||"").includes("NetworkError")));
+      if ((isAbort || isNetwork) && attempt < maxRetries) {
+        const waitMs = 500 * (2 ** attempt) + Math.floor(Math.random()*250);
+        lastErr = e;
+        attempt++;
+        await new Promise(r=>setTimeout(r, waitMs));
+        continue;
+      }
+
+      throw e;
+    }
+  }
+
+  throw lastErr || new Error("Échec du fetch (retry épuisés).");
+}
+
+async function fetchCSV(url) {
+  // Backward compatible: now smart-detects common Google Sheets "wrong gid / wrong tab" issues.
+  return fetchCSVSmart("generic", url);
+}
+
+function looksLikeHtml(text) {
+  const t = (text || "").trim().slice(0, 200).toLowerCase();
+  return t.startsWith("<!doctype") || t.startsWith("<html") || t.includes("<head") || t.includes("<body");
+}
+
+function normalizeGSheetUrl(url) {
+  if (!url) return url;
+  let u = url.trim();
+  // If user pasted pubhtml, try convert to output=csv
+  if (u.includes("/pubhtml")) {
+    u = u.replace("/pubhtml", "/pub");
+    if (!/output=csv/.test(u)) {
+      u += (u.includes("?") ? "&" : "?") + "output=csv";
+    }
+  }
+  return u;
+}
+
+function buildCandidateWithGid(originalUrl, gid) {
+  let u = originalUrl;
+  if (/([?&])gid=\d+/.test(u)) {
+    u = u.replace(/([?&])gid=\d+/, `$1gid=${gid}`);
+  } else {
+    u += (u.includes("?") ? "&" : "?") + `gid=${gid}`;
+  }
+  if (!/output=csv/.test(u) && u.includes("/pub")) {
+    u += (u.includes("?") ? "&" : "?") + "output=csv";
+  }
+  return u;
+}
+
+function toPubHtmlUrl(csvUrl) {
+  const u = csvUrl.split("#")[0];
+  if (u.includes("/pub?") || u.includes("/pub&") || u.includes("/pubhtml")) {
+    const base = u.replace("/pubhtml", "/pub").replace("/pub?", "/pubhtml?");
+    const parts = base.split("?");
+    const path = parts[0];
+    const qs = parts[1] || "";
+    if (!qs) return path;
+    const kept = qs
+      .split("&")
+      .map(s => s.trim())
+      .filter(Boolean)
+      .filter(kv => !kv.startsWith("output=") && !kv.startsWith("single=") && !kv.startsWith("range="));
+    return kept.length ? `${path}?${kept.join("&")}` : path;
+  }
+  return null;
+}
+
+function validateHeaders(kind, rows) {
+  if (!rows || !rows.length) return { ok: false, reason: "CSV vide" };
+  const header = (rows[0] || []).map(x => String(x || "").trim().toLowerCase());
+  const has = (name) => header.includes(name.toLowerCase());
+  if (kind === "base") {
+    const ok = (has("asin") || has("asins")) && (has("email") || has("delivered_to") || has("account"));
+    return ok ? { ok: true } : { ok: false, reason: "Colonnes base attendues manquantes (asin + email)" };
+  }
+  if (kind === "mapping") {
+    const ok = has("fnsku") && has("asin");
+    return ok ? { ok: true } : { ok: false, reason: "Colonnes mapping attendues manquantes (fnsku + asin)" };
+  }
+  return { ok: true };
+}
+
+async function tryFetchCsvObjects(kind, url, opts = {}) {
+  const text = await fetchTextWithRetry(url, { timeoutMs: opts.timeoutMs ?? 18000, maxRetries: opts.maxRetries ?? 4 });
+  if (looksLikeHtml(text)) {
+    return { ok: false, reason: "URL renvoie du HTML (pas un CSV). Publie la feuille en CSV ou vérifie l'onglet.", url, status: 200 };
+  }
+  const rows = parseCSV(text);
+  const v = validateHeaders(kind, rows);
+  if (!v.ok) return { ok: false, reason: v.reason, url, rows };
+  const objs = rowsToObjects(rows);
+  return { ok: true, url, objs, rows };
+}
+
+async function detectGidsFromPubHtml(pubHtmlUrl) {
+  const text = await fetchTextWithRetry(pubHtmlUrl, { timeoutMs: 18000, maxRetries: 2 });
+  const gids = new Set();
+  const re = /[?&]gid=(\d+)/g;
+  let m;
+  while ((m = re.exec(text)) !== null) gids.add(m[1]);
+  return Array.from(gids).map(s => parseInt(s, 10)).filter(n => Number.isFinite(n));
+}
+
+async function fetchCSVSmart(kind, url) {
+  if (!url) throw new Error("URL CSV manquante.");
+  const original = normalizeGSheetUrl(url);
+
+  // First attempt
+  try {
+    const r1 = await tryFetchCsvObjects(kind === "generic" ? "generic" : kind, original);
+    if (r1.ok) return r1.objs;
+  } catch (e) {
+    // Continue to autodetect if possible
+  }
+
+  // Auto-sheet detect only for base/mapping
+  if (kind !== "base" && kind !== "mapping") {
+    const r = await tryFetchCsvObjects("generic", original).catch(err => { throw err; });
+    if (!r.ok) throw new Error(r.reason || "Impossible de lire le CSV.");
+    return r.objs;
+  }
+
+  const cacheKey = kind === "base" ? "DETECTED_GID_BASE" : "DETECTED_GID_MAPPING";
+  const cachedGid = localStorage.getItem(cacheKey);
+  if (cachedGid && /\d+/.test(cachedGid)) {
+    const candidate = buildCandidateWithGid(original, cachedGid);
+    const rc = await tryFetchCsvObjects(kind, candidate, { timeoutMs: 15000, maxRetries: 2 }).catch(() => null);
+    if (rc && rc.ok) return rc.objs;
+  }
+
+  const pubHtml = toPubHtmlUrl(original);
+  if (!pubHtml) {
+    throw new Error("CSV invalide ou vide. Vérifie l'URL CSV (pub?gid=...&output=csv) et que l'onglet est bien publié.");
+  }
+
+  const gids = await detectGidsFromPubHtml(pubHtml).catch(() => []);
+  if (!gids.length) {
+    throw new Error('Impossible de détecter les onglets (gid) sur la page publiée. Vérifie que la feuille est "Publiée sur le Web".');
+  }
+
+  for (const gid of gids) {
+    const candidate = buildCandidateWithGid(original, gid);
+    const r = await tryFetchCsvObjects(kind, candidate, { timeoutMs: 15000, maxRetries: 2 }).catch(() => null);
+    if (r && r.ok) {
+      localStorage.setItem(cacheKey, String(gid));
+      return r.objs;
+    }
+  }
+
+  throw new Error(`CSV vide ou onglet incorrect (${kind}). Vérifie l'URL (gid) ou publie le bon onglet en CSV.`);
+}
+
+/* ---------- Pull base + mapping ---------- */
+async function pullBaseAndMapping(){
+  const s = getSettings();
+  // Anti-429 : évite de re-télécharger en boucle si tu cliques plusieurs fois
+  const nowMs = Date.now();
+  const lastPullMs = Number(localStorage.getItem('VINE_lastPullMs') || '0');
+  if (nowMs - lastPullMs < 60_000) {
+    toast('⏳ Attends 1 min (anti-429)');
+    return;
+  }
+  localStorage.setItem('VINE_lastPullMs', String(nowMs));
+
+  if (!s.baseCsvUrl || !s.mappingCsvUrl){
+    toast("⚠️ Renseigne les 2 URLs CSV (Base + Mapping) dans Réglages.", "warn");
+    return;
+  }
+
+  // Anti-spam : évite de marteler Google (429)
+  const now = Date.now();
+  const last = Number(localStorage.getItem("vine_last_pull_ms") || "0");
+  const COOLDOWN_MS = 15000; // 15s
+  if (now - last < COOLDOWN_MS){
+    const sec = Math.ceil((COOLDOWN_MS - (now-last))/1000);
+    toast(`⏳ Patiente ${sec}s (anti-429)`, "info");
+    return;
+  }
+  localStorage.setItem("vine_last_pull_ms", String(now));
+
+  const btnPull = el("btnPullNow");
+  if (btnPull) btnPull.disabled = true;
+
+  try{
+    toast("📥 Pull Base + Mapping…", "info");
+
+    // On garde une sauvegarde pour ne jamais "vider" si Google renvoie un CSV vide
+    const prevBase = JSON.parse(localStorage.getItem("vine_base_cache") || "[]");
+    const prevMap  = JSON.parse(localStorage.getItem("vine_mapping_cache") || "[]");
+
+    const [base, mapping] = await Promise.all([
+      fetchCSVSmart('base', s.baseCsvUrl),
+      fetchCSVSmart('mapping', s.mappingCsvUrl)
+    ]);
+
+    // Tolérance : si un CSV revient vide (rate limit / bug), on conserve l'ancien cache
+    const baseOk = Array.isArray(base) && base.length > 0;
+    const mapOk  = Array.isArray(mapping) && mapping.length > 0;
+
+    if (!baseOk && prevBase.length){
+      toast("⚠️ Base CSV vide → on garde le cache local.", "warn");
+      BASE_ROWS = prevBase;
+    } else {
+      BASE_ROWS = base;
+      localStorage.setItem("vine_base_cache", JSON.stringify(BASE_ROWS));
+    }
+
+    if (!mapOk && prevMap.length){
+      toast("⚠️ Mapping CSV vide → on garde le cache local.", "warn");
+      MAPPING_ROWS = prevMap;
+    } else {
+      MAPPING_ROWS = mapping;
+      localStorage.setItem("vine_mapping_cache", JSON.stringify(MAPPING_ROWS));
+    }
+
+    updateBadges();
+    if (typeof renderAccountFilterOptions === 'function') renderAccountFilterOptions();
+    toast(`✅ Base:${BASE_ROWS.length} | Mapping:${MAPPING_ROWS.length}`, "ok");
+
+      // trace "Dernière sync Google Sheets" : seulement si au moins 1 CSV a été réellement mis à jour
+  const didUpdate = (baseOk || mapOk);
+  if (didUpdate) {
+    const hhmm = new Date().toLocaleTimeString('fr-FR', {hour:'2-digit', minute:'2-digit'});
+    localStorage.setItem(LS.lastSync, hhmm);
+    try{ el("lastSync").textContent = hhmm; }catch(_){}
+  } else {
+    toast("❌ CSV vide ou onglet incorrect (vérifie URL + onglet publié)", "err");
+  }
+
+  }catch(e){
+    const msg = String(e && e.message ? e.message : e);
+    if (msg.includes("HTTP 429")){
+      toast("❌ Pull impossible (429). Réessaie dans 30s.", "err");
+    } else if (/csv|onglet|colonn|publi/i.test(msg)) {
+      toast("❌ " + msg, "err");
+    } else if (/csv|onglet|colonn|publi/i.test(msg)) {
+      toast("❌ " + msg, "err");
+    } else {
+      toast("❌ Pull impossible (URL / réseau ?)", "err");
+    }
+    console.error(e);
+  }finally{
+    if (btnPull) btnPull.disabled = false;
+  }
+}
+
+function parseAccountsField(v){
+  // accepte: "mail1:2026-01-08;mail2:2026-01-09" ou "mail1, mail2"
+  const out = {};
+  if(!v) return out;
+  const parts = String(v).split(/[;|\n]/).map(s=>s.trim()).filter(Boolean);
+  if(parts.length){
+    for(const p of parts){
+      const m = p.match(/^([^:]+):\s*(.+)$/);
+      if(m) out[m[1].trim()] = m[2].trim();
+      else out[p.trim()] = "";
+    }
+  }
+  return out;
+}
+
+/* ---------- Actions sync (best effort) ---------- */
+async function syncActions(){
+  const s = getSettings();
+  if(!s.scriptUrl || !s.secret){
+    toast("⚠️ Mets Apps Script URL + SECRET");
+    return;
+  }
+
+  // Message clair si la base/mapping n'ont pas été chargés (souvent URL CSV vide / onglet incorrect)
+  const baseItems = getLocal("baseItems", []);
+  const mappingItems = getLocal("mappingItems", []);
+  if(!baseItems.length || !mappingItems.length){
+    toast("❌ CSV vide ou onglet incorrect (base/mapping). Fais 'Mettre à jour base + mapping' et vérifie les URLs CSV.", "err");
+    // On continue quand même si tu veux pousser des actions existantes, mais au moins le message est clair.
+  }
+  const actions = getActions();
+  if(!actions.length){
+    toast("Rien à sync");
+    return;
+  }
+  el("btnSyncNow").disabled = true;
+  try{
+    // multiple formats (tolérant)
+    const payload = { secret:s.secret, op:"sync", actions };
+    const r = await fetch(s.scriptUrl, {
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify(payload)
+    });
+    const txt = await r.text();
+    if(!r.ok) throw new Error("HTTP "+r.status+" "+txt);
+    // si ok -> clear local actions
+    setActions([]);
+    renderActions();
+    localStorage.setItem(LS.lastSync, nowHHMM());
+    updateCounts();
+    toast("✅ Sync OK");
+  }catch(e){
+    console.error(e);
+    toast("❌ Sync KO (URL/SECRET?)");
+  }finally{
+    el("btnSyncNow").disabled = false;
+  }
+}
+
+/* ---------- Search ---------- */
+let lastResults = [];
+let showLimit = 20;
+
+function rebuildAccountFilter(){
+  const sel = el("accountFilter");
+  if(!sel) return;
+  const map = getMap();
+  const set = new Set();
+  for(const k of Object.keys(map)){
+    const acc = map[k].accounts || {};
+    Object.keys(acc).forEach(a=>set.add(a));
+  }
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">Tous les comptes</option>';
+  [...set].sort((a,b)=>a.localeCompare(b)).forEach(a=>{
+    const opt=document.createElement("option");
+    opt.value=a; opt.textContent=a;
+    sel.appendChild(opt);
+  });
+  sel.value = cur && set.has(cur) ? cur : "";
+}
+
+function accountsWithDateText(prod){
+  const acc = prod.accounts || {};
+  const entries = Object.entries(acc);
+  if(!entries.length) return "";
+  return entries.map(([mail,dt])=>{
+    const jjmm = fmtJJMM(dt);
+    return jjmm ? `${mail} (${jjmm})` : mail;
+  }).join(" · ");
+}
+
+function byMostRecentAccountDate(prod){
+  const acc = prod.accounts || {};
+  let best = "";
+  for(const dt of Object.values(acc)){
+    if(!dt) continue;
+    if(!best || String(dt) > String(best)) best = String(dt);
+  }
+  return best || "";
+}
+
+function searchFnskuOrText(q){
+  const map = getMap();
+  const base = getBase();
+  const nq = normalizeStr(q);
+  const filterAcc = el("accountFilter").value || "";
+
+  // 1) FNSKU direct
+  const fnskuKey = q.trim();
+  if(map[fnskuKey]){
+    const m = map[fnskuKey];
+    const merged = mergeWithBase(m, base);
+    return [merged];
+  }
+
+  // 2) Recherche texte dans base
+  const results=[];
+  for(const p of base){
+    const title = p.title || "";
+    const asin = p.asin || "";
+    const hay = normalizeStr(title + " " + asin);
+    if(!nq || hay.includes(nq)){
+      // enrich accounts depuis mapping par ASIN (si trouvé)
+      const merged = mergeAccountsByAsin(p, map);
+      if(filterAcc){
+        const acc=merged.accounts||{};
+        if(!(filterAcc in acc)) continue;
+      }
+      results.push(merged);
+    }
+  }
+
+  // tri: date récente si possible, sinon titre
+  results.sort((a,b)=>{
+    const da = byMostRecentAccountDate(a);
+    const db = byMostRecentAccountDate(b);
+    if(da && db && da!==db) return db.localeCompare(da);
+    if(db && !da) return 1;
+    if(da && !db) return -1;
+    return String(a.title||"").localeCompare(String(b.title||""));
+  });
+
+  return results;
+}
+
+function mergeAccountsByAsin(prod, map){
+  const asin = (prod.asin || "").trim();
+  if(!asin) return { ...prod, accounts:{} };
+  // cherche toutes les entrées mapping qui ont cet asin (O(n) mais ok)
+  const accounts = {};
+  for(const fnsku of Object.keys(map)){
+    const m = map[fnsku];
+    if((m.asin||"").trim() !== asin) continue;
+    const acc = m.accounts || {};
+    for(const [mail,dt] of Object.entries(acc)){
+      // garder la plus récente
+      if(!accounts[mail] || (dt && dt > accounts[mail])) accounts[mail]=dt || accounts[mail] || "";
+    }
+  }
+  return { ...prod, accounts };
+}
+
+function mergeWithBase(mapEntry, base){
+  const asin = (mapEntry.asin || "").trim();
+  const found = base.find(p => (p.asin||"").trim() === asin);
+  if(found){
+    const merged = { ...found, ...mapEntry };
+    merged.accounts = mapEntry.accounts || {};
+    return merged;
+  }
+  return { ...mapEntry };
+}
+
+function renderResults(){
+  const area = el("resultsArea");
+  if(!area) return;
+
+  const items = lastResults.slice(0, showLimit);
+  if(!items.length){
+    area.innerHTML = '<div class="muted small">Aucun résultat.</div>';
+    el("btnMore").style.display = "none";
+    return;
+  }
+
+  const wrap=document.createElement("div");
+  wrap.className="products";
+
+  for(const p of items){
+    const card=document.createElement("div");
+    card.className="p";
+
+    const imgDiv=document.createElement("div");
+    imgDiv.className="img";
+    if(p.photo_url){
+      const im=document.createElement("img");
+      im.src=p.photo_url;
+      im.loading="lazy";
+      im.onerror=()=>{ imgDiv.innerHTML=""; };
+      imgDiv.appendChild(im);
+    }
+    card.appendChild(imgDiv);
+
+    const right=document.createElement("div");
+    const title=document.createElement("div");
+    title.className="title";
+    title.textContent = p.title || "(sans titre)";
+    right.appendChild(title);
+
+    const meta=document.createElement("div");
+    meta.className="meta";
+    const price = (p.price||"").trim();
+    meta.innerHTML = `ASIN: <span class="k">${(p.asin||"")}</span>` + (price? ` · <b>${price}</b>` : "");
+    right.appendChild(meta);
+
+    const accTxt = accountsWithDateText(p);
+    if(accTxt){
+      const accDiv=document.createElement("div");
+      accDiv.className="meta";
+      accDiv.textContent = "comptes: " + accTxt;
+      right.appendChild(accDiv);
+    }
+
+    const actions=document.createElement("div");
+    actions.className="row";
+    actions.style.marginTop="8px";
+
+    if(p.product_url){
+      const a=document.createElement("a");
+      a.href=p.product_url;
+      a.target="_blank";
+      a.rel="noreferrer";
+      a.textContent="Lien produit";
+      a.style.fontSize="12px";
+      actions.appendChild(a);
+    }
+
+    // bouton "Sélectionner" = enregistre action locale (fnsku+asin+date)
+    const btn=document.createElement("button");
+    btn.className="secondary";
+    btn.textContent="Sélectionner";
+    btn.onclick=()=>{
+      const fnsku = el("fnskuInput").value.trim();
+      const action = {
+        ts: Date.now(),
+        fnsku: fnsku || "",
+        asin: (p.asin||"").trim(),
+        title: p.title||"",
+        account: el("accountFilter").value || ""
+      };
+      const actions = getActions();
+      actions.unshift(action);
+      setActions(actions.slice(0,200));
+      renderActions();
+      toast("Ajouté en local");
+    };
+    actions.appendChild(btn);
+
+    right.appendChild(actions);
+    card.appendChild(right);
+    wrap.appendChild(card);
+  }
+
+  area.innerHTML="";
+  area.appendChild(wrap);
+
+  el("btnMore").style.display = (lastResults.length > showLimit) ? "inline-flex" : "none";
+}
+
+function doSearch(){
+  const q = el("fnskuInput").value.trim();
+  showLimit = 20;
+  lastResults = searchFnskuOrText(q);
+  renderResults();
+}
+
+/* ---------- Actions UI ---------- */
+function renderActions(){
+  const a = el("actionsArea");
+  if(!a) return;
+  const rows = getActions();
+  if(!rows.length){ a.textContent="—"; return; }
+  a.innerHTML = rows.slice(0,25).map(x=>{
+    const d = new Date(x.ts||Date.now());
+    const hh=String(d.getHours()).padStart(2,"0");
+    const mm=String(d.getMinutes()).padStart(2,"0");
+    return `<div>• <span class="k">${hh}:${mm}</span> ${x.fnsku||""} → <span class="k">${x.asin||""}</span> <span class="muted">${(x.account||"")}</span></div>`;
+  }).join("");
+}
+
+function toggleSettings(show){
+  const box = el("settingsBox");
+  if(!box) return;
+  box.style.display = show ? "block" : "none";
+}
+
+/* ---------- Export CSV (mapping) ---------- */
+function exportMappingCSV(){
+  const map = getMap();
+  const rows = [["fnsku","asin","accounts"]];
+  for(const [fnsku,v] of Object.entries(map)){
+    const acc = v.accounts || {};
+    const accStr = Object.entries(acc).map(([m,d])=> d ? `${m}:${d}` : m).join(";");
+    rows.push([fnsku, v.asin||"", accStr]);
+  }
+  const csv = rows.map(r=>r.map(cell=>{
+    const s=String(cell??"");
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s;
+  }).join(",")).join("\n");
+  const blob = new Blob([csv], {type:"text/csv;charset=utf-8"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "vine_mapping.csv";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+/* ---------- Init ---------- */
+function loadSettingsToUI(){
+  const s=getSettings();
+  el("setScriptUrl").value = s.scriptUrl || "";
+  el("setSecret").value = s.secret || "";
+  el("setBaseCsv").value = s.baseCsv || "";
+  el("setMapCsv").value = s.mapCsv || "";
+}
+function saveSettingsFromUI(){
+  const s={
+    scriptUrl: el("setScriptUrl").value.trim(),
+    secret: el("setSecret").value.trim(),
+    baseCsv: el("setBaseCsv").value.trim(),
+    mapCsv: el("setMapCsv").value.trim()
+  };
+  setSettings(s);
+  toast("✅ Réglages enregistrés");
+}
+
+function resetLocal(){
+  if(!confirm("Reset cache local (base+mapping+actions) ?")) return;
+  localStorage.removeItem(LS.base);
+  localStorage.removeItem(LS.map);
+  localStorage.removeItem(LS.actions);
+  localStorage.removeItem(LS.lastSync);
+  updateCounts();
+  rebuildAccountFilter();
+  renderActions();
+  el("resultsArea").innerHTML = '<div class="muted small">Cache vidé.</div>';
+  toast("✅ Reset OK");
+}
+
+function bindSafe(id, fn){
+  const e=el(id);
+  if(!e) return;
+  e.addEventListener("click", ()=>{ try{ fn(); }catch(err){ console.error(err); toast("❌ Erreur"); } });
+}
+
+document.addEventListener("DOMContentLoaded", ()=>{
+  setNetPill();
+  updateCounts();
+  rebuildAccountFilter();
+  renderActions();
+  loadSettingsToUI();
+  focusFNSKU();
+
+  // service worker (si présent)
+  if("serviceWorker" in navigator){
+    navigator.serviceWorker.register("./sw.js").catch(()=>{});
+  }
+
+  // binds
+  bindSafe("btnSearch", doSearch);
+  bindSafe("btnClear", ()=>{ el("fnskuInput").value=""; focusFNSKU(); doSearch(); });
+  bindSafe("btnSettings", ()=>{ toggleSettings(true); loadSettingsToUI(); });
+  bindSafe("btnCloseSettings", ()=>toggleSettings(false));
+  bindSafe("btnSaveSettings", saveSettingsFromUI);
+  bindSafe("btnResetLocal", resetLocal);
+  bindSafe("btnExportCsv", exportMappingCSV);
+
+  bindSafe("btnPullNow", ()=>pullBaseAndMapping());
+  bindSafe("btnSyncNow", ()=>syncActions());
+  bindSafe("btnMore", ()=>{ showLimit += 20; renderResults(); });
+  bindSafe("btnClearActions", ()=>{ setActions([]); renderActions(); toast("Actions vidées"); });
+
+  el("accountFilter").addEventListener("change", ()=>{ doSearch(); });
+
+  el("fnskuInput").addEventListener("keydown", (e)=>{ if(e.key==="Enter") doSearch(); });
+
+  // auto-focus au retour d'une autre app
+  window.addEventListener("focus", ()=>setTimeout(focusFNSKU, 120));
+});
+</script>
+</body>
+</html>
