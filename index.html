@@ -87,9 +87,6 @@
 
   <div class="row">
     <input id="q" placeholder="Recherche (marque / mot / ASIN B0…)" style="flex:1;min-width:260px" />
-    <select id="accountFilter" style="max-width:180px">
-      <option value="ALL">Tous comptes</option>
-    </select>
     <button class="btnGhost" id="btnSearch">Rechercher</button>
   </div>
   <div class="muted" style="margin-top:8px">
@@ -97,9 +94,6 @@
   </div>
 
   <div class="list" id="results" style="margin-top:10px"></div>
-  <div class="row" style="justify-content:center;margin-top:10px">
-    <button class="btnGhost" id="btnMore" style="display:none">+ 20</button>
-  </div>
 </div>
 
 <!-- CONFIRMATION (Option B) -->
@@ -187,8 +181,7 @@
 
   <hr style="border:none;border-top:1px solid #eee;margin:12px 0">
   <div class="row">
-    <button class="btnGhost" id="btnExportMapping">Exporter mapping CSV (FNSKU↔ASIN)</button>
-    \1
+    <button class="btnGhost" id="btnResetCache">Réinitialiser cache local</button>
     <span class="muted">⚠️ Efface base produits, mapping et actions non sync.</span>
   </div>
 </div>
@@ -320,41 +313,6 @@ function aliasFromEmail(email){
   return first.charAt(0).toUpperCase() + first.slice(1);
 }
 
-function normStr(s){
-  return (s||'').toString()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g,'')
-    .toUpperCase();
-}
-
-function updateAccountFilter(all){
-  const sel = $('accountFilter');
-  if(!sel) return;
-  const prev = sel.value || 'ALL';
-
-  const emails = new Set();
-  (all||[]).forEach(p=>{
-    (p.history||[]).forEach(h=>{
-      const e = (h.email||'').toString().trim().toLowerCase();
-      if(e) emails.add(e);
-    });
-  });
-
-  const list = Array.from(emails).sort();
-  sel.innerHTML = '<option value="ALL">Tous comptes</option>' +
-    list.map(e=>{
-      const label = aliasFromEmail(e);
-      return `<option value="${e}">${label}</option>`;
-    }).join('');
-
-  // restore selection if possible
-  if(list.includes(prev)) sel.value = prev;
-  else sel.value = 'ALL';
-}
-
-let _searchLimit = 40;
-let _lastFiltered = [];
-
 function accountsWithFirstOrderDate(history){
   const minTsByEmail = new Map();
   (history||[]).forEach(h=>{
@@ -387,32 +345,20 @@ function getLastOrderTimestamp(product){
 }
 
 function prodHTML(p){
-  const img = p.photo_url
-    ? `<img src="${p.photo_url}" alt="">`
-    : `<div class="ph">📦</div>`;
-
+(p){
+  const img = p.photo_url ? `<img src="${p.photo_url}" alt="">` : `<div class="ph">📦</div>`;
   const price = p.price ? ` · <b>${p.price}</b>` : '';
-
-  // Comptes + date JJ/MM
-  const acc = accountsWithFirstOrderDate(p.history || []);
-  const cnt = acc.length
-    ? ` · 👤 ${acc.length} comptes: ${acc.join(' · ')}`
-    : '';
-
+  // Comptes + date JJ/MM (Option A: 1ère date par compte)
+  const acc = accountsWithFirstOrderDate(p.history||[]);
+  const cnt = acc.length ? ` · 👤 ${acc.length} comptes: ${acc.join(' · ')}` : '';
   return `
     ${img}
     <div>
-      <h4>${escapeHtml(p.title || '')}</h4>
-      <div class="meta">
-        ASIN: <b>${p.asin}</b>${price}${cnt}
-      </div>
-      <div class="meta">
-        ${p.product_url ? `<a href="${p.product_url}" target="_blank">Lien produit</a>` : ''}
-      </div>
-    </div>
-  `;
+      <h4>${escapeHtml(p.title||'')}</h4>
+      <div class="meta">ASIN: <b>${p.asin}</b>${price}${cnt}</div>
+      <div class="meta">${p.product_url ? `<a href="${p.product_url}" target="_blank">Lien produit</a>` : ''}</div>
+    </div>`;
 }
-
 function escapeHtml(s){
   return (s||'').toString().replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;' }[m]));
 }
@@ -605,31 +551,18 @@ async function lookupFnsku(){
 
 /* Search products */
 async function doSearch(){
-  const qRaw = ($('q').value||'').trim();
-  const qN = normStr(qRaw);
-
+  const q = ($('q').value||'').trim().toUpperCase();
   const all = await idbGetAll('products');
   if(!all.length){
-    $('results').innerHTML = '<div class="muted">Base vide. Va dans <b>Réglages</b> → <b>Mettre à jour base + mapping</b>.</div>';
-    $('btnMore').style.display = 'none';
+    $('results').innerHTML = `<div class="item"><div class="muted err">Base produits vide. Va dans ⚙️ Réglages, puis “Mettre à jour base + mapping”.</div></div>`;
     return;
   }
 
-  // populate "compte" filter from history
-  updateAccountFilter(all);
-  const sel = ($('accountFilter')?.value || 'ALL').toLowerCase();
-
-  let filtered = all.filter(p=>{
-    if(sel !== 'all'){
-      const has = (p.history||[]).some(h => (h.email||'').toString().trim().toLowerCase() === sel);
-      if(!has) return false;
-    }
-    if(!qN) return true;
-    const hay = normStr([p.asin, p.title, p.product_url].join(' '));
-    return hay.includes(qN);
-  });
-
-  filtered = filtered.sort((a,b)=>{
+  const filtered = all.filter(p=>{
+    const t=(p.title||'').toString().toUpperCase();
+    const asin=(p.asin||'').toString().toUpperCase();
+    return !q || t.includes(q) || asin.includes(q);
+  }).sort((a,b)=>{
     const tb = getLastOrderTimestamp(b);
     const ta = getLastOrderTimestamp(a);
     if(tb !== ta) return tb - ta; // plus récent en premier
@@ -641,11 +574,7 @@ async function doSearch(){
     return;
   }
 
-    _lastFiltered = filtered;
-  const list = filtered.slice(0, _searchLimit);
-  $('btnMore').style.display = (filtered.length > _searchLimit) ? 'inline-flex' : 'none';
-
-  $('results').innerHTML = list.map(p=>`
+  $('results').innerHTML = filtered.map(p=>`
     <div class="item">
       <div class="prod">${prodHTML(p)}</div>
       <div class="row" style="margin-top:8px">
@@ -779,11 +708,8 @@ $('btnClear').onclick = ()=>{
   $('fnsku').focus();
 };
 
-$('btnSearch').onclick = ()=>{ _searchLimit=40; doSearch(); };
-$('q').addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ _searchLimit=40; doSearch(); } });
-$('q').addEventListener('input', ()=>{ _searchLimit=40; });
-$('accountFilter').onchange = ()=>{ _searchLimit=40; doSearch(); };
-$('btnMore').onclick = ()=>{ _searchLimit += 20; doSearch(); };
+$('btnSearch').onclick = doSearch;
+$('q').addEventListener('keydown', (e)=>{ if(e.key==='Enter') doSearch(); });
 
 $('btnLink').onclick = linkFnsku;
 $('btnChange').onclick = ()=>{
@@ -812,24 +738,6 @@ $('btnSaveSettings').onclick = async ()=>{
   localStorage.setItem(LS.secret, secret);
   $('settingsStatus').textContent = '✅ Sauvé. Fais “Mettre à jour base + mapping”.';
   await refreshPills();
-};
-
-$('btnExportMapping').onclick = async ()=>{
-  const rows = await idbGetAll('mapping');
-  if(!rows.length){ alert('Mapping vide. Fais “Mettre à jour base + mapping”.'); return; }
-  const header = ['fnsku','asin','linked_at'];
-  const csv = [header.join(';')].concat(rows.map(r=>[
-    (r.fnsku||''), (r.asin||''), (r.linked_at||'')
-  ].map(v=>(''+v).replace(/\r?\n/g,' ').replace(/;/g, ',')).join(';'))).join('\n');
-  const blob = new Blob([csv], {type:'text/csv;charset=utf-8'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'mapping_fnsku_asin.csv';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(()=>URL.revokeObjectURL(url), 1000);
 };
 
 $('btnResetCache').onclick = async ()=>{
