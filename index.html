@@ -342,8 +342,7 @@ function parseCaissesField(v){
   const s = String(v).trim();
   if(!s) return [];
   return s
-    .split(/[,;
-	]+/g)
+    .split(/[;,]+/g)
     .map(x=>String(x||'').trim())
     .filter(Boolean)
     .map(x=>x.toUpperCase());
