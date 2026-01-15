@@ -58,7 +58,7 @@
   </div>
   <div class="row" style="margin-top:10px">
     <button class="btnPrimary" id="btnLookup">Chercher</button>
-    <button class="btnGhost" id="btnSettings">⚙️ Réglages</button>
+    <button class="btnGhost" id="btnSettings" data-action="open-settings">⚙️ Réglages</button>
     <span class="muted" id="status">Prêt.</span>
   </div>
 </div>
@@ -191,6 +191,21 @@
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js'); }
 
 const $ = (id)=>document.getElementById(id);
+
+// --- SAFE BINDERS (évite crash si un ID change / manque) ---
+function bindClick_(id, fn){
+  const el = document.getElementById(id);
+  if (!el) { console.warn('[UI] missing element:', id); return false; }
+  el.addEventListener('click', fn);
+  return true;
+}
+function bindInput_(id, fn){
+  const el = document.getElementById(id);
+  if (!el) { console.warn('[UI] missing element:', id); return false; }
+  el.addEventListener('input', fn);
+  return true;
+}
+
 const netPill=$('netPill'), cachePill=$('cachePill'), mapPill=$('mapPill');
 
 const LS = {
@@ -693,7 +708,7 @@ async function saveAction({fnsku, asin, caisse, action}){
 
 /* UI bindings */
 $('btnLookup').onclick = lookupFnsku;
-$('btnClear').onclick = ()=>{
+bindClick_('btnClear', () => {
   $('fnsku').value='';
   $('q').value='';
   $('results').innerHTML='';
@@ -706,7 +721,7 @@ $('btnClear').onclick = ()=>{
   $('afterLinkBox').classList.add('hidden');
   setStatus('Prêt.', '');
   $('fnsku').focus();
-};
+});
 
 $('btnSearch').onclick = doSearch;
 $('q').addEventListener('keydown', (e)=>{ if(e.key==='Enter') doSearch(); });
@@ -728,8 +743,8 @@ $('btnSaveAfter').onclick = async ()=>{
   await saveAction({fnsku: currentFnsku, asin: selectedProduct.asin, caisse:$('caisseAfter').value, action:$('actionAfter').value});
 };
 
-$('btnSettings').onclick = ()=>{ $('settingsBox').classList.toggle('hidden'); };
-$('btnCloseSettings').onclick = ()=>{ $('settingsBox').classList.add('hidden'); };
+bindClick_('btnSettings', () => { $('settingsBox').classList.toggle('hidden'); };
+bindClick_('btnCloseSettings', () => { $('settingsBox').classList.add('hidden'); };
 
 $('btnSaveSettings').onclick = async ()=>{
   apiUrl = ($('apiUrl').value||'').trim();
@@ -738,7 +753,7 @@ $('btnSaveSettings').onclick = async ()=>{
   localStorage.setItem(LS.secret, secret);
   $('settingsStatus').textContent = '✅ Sauvé. Fais “Mettre à jour base + mapping”.';
   await refreshPills();
-};
+});
 
 $('btnResetCache').onclick = async ()=>{
   if(!confirm('Effacer base produits + mapping + actions locales ?')) return;
