@@ -385,18 +385,6 @@ function getLastOrderTimestamp(product){
   }
   return maxTs;
 }
-function getLastOrderTimestampForEmail(product, emailLower){
-  const hist = Array.isArray(product?.history) ? product.history : [];
-  let maxTs = 0;
-  for(const h of hist){
-    const em = (h.email || '').toString().trim().toLowerCase();
-    if(em !== emailLower) continue;
-    const ts = Date.parse(String(h.order_date||'').trim().replace(' ', 'T'));
-    if(!isNaN(ts) && ts > maxTs) maxTs = ts;
-  }
-  return maxTs;
-}
-
 
 function prodHTML(p){
   const img = p.photo_url
@@ -642,19 +630,11 @@ async function doSearch(){
   });
 
   filtered = filtered.sort((a,b)=>{
-    const selEmail = (sel && sel !== 'all') ? sel : null;
-
-    const tb = selEmail
-      ? getLastOrderTimestampForEmail(b, selEmail)
-      : getLastOrderTimestamp(b);
-
-    const ta = selEmail
-      ? getLastOrderTimestampForEmail(a, selEmail)
-      : getLastOrderTimestamp(a);
-
-    if(tb !== ta) return tb - ta; // plus récent en premier (selEmail si filtre)
+    const tb = getLastOrderTimestamp(b);
+    const ta = getLastOrderTimestamp(a);
+    if(tb !== ta) return tb - ta; // plus récent en premier
     return (b.orders_count||0) - (a.orders_count||0); // fallback
-  });
+  }).slice(0,60);
 
   if(!filtered.length){
     $('results').innerHTML = `<div class="item"><div class="muted warn">Aucun résultat.</div></div>`;
