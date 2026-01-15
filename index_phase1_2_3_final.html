@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Vine Stock (Phase 1+2+3)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#f6f7f9;margin:0;padding:16px}
+h1{font-size:22px;margin-bottom:4px}
+.sub{color:#666;font-size:14px;margin-bottom:16px}
+.card{background:#fff;border-radius:12px;padding:14px;margin-bottom:12px;box-shadow:0 4px 12px rgba(0,0,0,.05)}
+button,select,input{padding:10px 14px;border-radius:8px;border:1px solid #ddd;font-size:15px}
+button{background:#111;color:#fff;border:0}
+.controls{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px}
+.small{font-size:13px;color:#666}
+</style>
+</head>
+<body>
+
+<h1>📦 Vine Stock</h1>
+<div class="sub">Version stable – Sync + filtre compte + tri date</div>
+
+<div class="controls">
+  <button id="syncBtn">🔄 Sync maintenant</button>
+  <select id="filter">
+    <option value="ALL">Tous les comptes</option>
+  </select>
+</div>
+
+<p id="status" class="small"></p>
+<div id="results"></div>
+
+<script>
+const API_URL = "https://script.google.com/macros/s/AKfycbzEoQWg8C-cRfvwIY7xjehY3Mw9F7k2cVs8ULv2JAJ_sd9-GSNaRKCHku1LKikqqtZF3w/exec";
+const SECRET  = "Vine_Secret_2026";
+
+function formatDate(d){
+  if(!d) return "";
+  const x=new Date(d);
+  return x.toLocaleDateString("fr-FR",{day:"2-digit",month:"2-digit"});
+}
+
+document.getElementById("syncBtn").onclick = async ()=>{
+  document.getElementById("status").textContent="Sync en cours…";
+  try{
+    const r = await fetch(`${API_URL}?op=pull_master_full&secret=${SECRET}`);
+    const j = await r.json();
+    if(!j.ok) throw j.error;
+    localStorage.setItem("vine_products",JSON.stringify(j.products||[]));
+    buildFilter();
+    render();
+    document.getElementById("status").textContent="Sync OK";
+  }catch(e){
+    document.getElementById("status").textContent="Erreur sync";
+    alert(e);
+  }
+};
+
+function buildFilter(){
+  const sel=document.getElementById("filter");
+  sel.innerHTML='<option value="ALL">Tous les comptes</option>';
+  const data=JSON.parse(localStorage.getItem("vine_products")||"[]");
+  const set=new Set();
+  data.forEach(p=>p.history.forEach(h=>h.email&&set.add(h.email)));
+  [...set].sort().forEach(e=>{
+    const o=document.createElement("option");
+    o.value=o.textContent=e;
+    sel.appendChild(o);
+  });
+}
+document.getElementById("filter").onchange=render;
+
+function render(){
+  const filter=document.getElementById("filter").value;
+  const data=JSON.parse(localStorage.getItem("vine_products")||"[]");
+  let rows=[];
+  data.forEach(p=>p.history.forEach(h=>{
+    if(filter==="ALL"||h.email===filter){
+      rows.push({title:p.title,email:h.email,date:h.order_date});
+    }
+  }));
+  if(filter!=="ALL"){
+    rows.sort((a,b)=>new Date(b.date)-new Date(a.date));
+  }
+  const box=document.getElementById("results");
+  box.innerHTML="";
+  if(!rows.length){
+    box.innerHTML='<p class="small">Aucun résultat</p>';
+    return;
+  }
+  rows.forEach(r=>{
+    const d=document.createElement("div");
+    d.className="card";
+    d.innerHTML=`<b>${r.title}</b><br>Compte : ${r.email}<br>Date : ${formatDate(r.date)}`;
+    box.appendChild(d);
+  });
+}
+
+buildFilter();
+render();
+</script>
+</body>
+</html>
