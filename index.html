@@ -319,36 +319,6 @@ function setCaissesForAsin(asin, caisses){
   if(clean.length) m[asin] = clean; else delete m[asin];
   localStorage.setItem(LS.caisseMap, JSON.stringify(m));
 }
-}
-
-// Parse / format caisses in MAPPING (accepts "A1|B2" or "A1,B2" or "A1;B2")
-function parseCaissesStr(v){
-  if(!v) return [];
-  if(Array.isArray(v)) return v.map(x=>String(x||'').trim().toUpperCase()).filter(Boolean);
-  return String(v)
-    .split(/[|,;\n\t ]+/g)
-    .map(x=>String(x||'').trim().toUpperCase())
-    .filter(Boolean);
-}
-function caissesToStr(arr){
-  return (arr||[]).map(x=>String(x||'').trim().toUpperCase()).filter(Boolean).join('|');
-}
-
-// Optional: sync caisses to server (requires Apps Script op 'set_mapping_caisses').
-// If op is missing, it will be silently ignored.
-async function syncCaissesToServer(asin){
-  try{
-    if(!online() || !apiUrl || !secret) return;
-    asin = normAsin(asin);
-    if(!asin) return;
-    const caisses = getCaissesForAsin(asin);
-    const resp = await apiPost({op:'set_mapping_caisses', asin, caisses});
-    if(resp && resp.ok) return;
-  }catch(e){
-    // ignore
-  }
-}
-
 function applyCaisseAction(asin, caisse, action){
   asin = normAsin(asin);
   caisse = (caisse||'').toString().trim().toUpperCase();
@@ -363,6 +333,50 @@ function applyCaisseAction(asin, caisse, action){
     cur.push(caisse);
     setCaissesForAsin(asin, cur);
   }
+}
+
+
+// ====== Caisses <-> MAPPING (optionnel) ======
+function parseCaissesField(v){
+  if(v==null) return [];
+  const s = String(v).trim();
+  if(!s) return [];
+  return s
+    .split(/[;,]+/g)
+    .map(x=>String(x||'').trim())
+    .filter(Boolean)
+    .map(x=>x.toUpperCase());
+}
+
+function mergeCaissesFromMapping(asin, caissesField){
+  asin = normAsin(asin);
+  if(!asin) return;
+  const incoming = parseCaissesField(caissesField);
+  if(!incoming.length) return;
+  const current = getCaissesForAsin(asin);
+  const set = new Set([...current, ...incoming]);
+  setCaissesForAsin(asin, [...set]);
+}
+
+const _caisseSyncTimers = new Map();
+async function queueSyncCaissesToMapping(asin){
+  // Best-effort: si le backend ne supporte pas l'op, on ignore.
+  asin = normAsin(asin);
+  if(!asin) return;
+  if(!online()) return;
+  const apiUrl = localStorage.getItem(LS.apiUrl) || '';
+  const secret = localStorage.getItem(LS.secret) || '';
+  if(!apiUrl || !secret) return;
+
+  if(_caisseSyncTimers.has(asin)) clearTimeout(_caisseSyncTimers.get(asin));
+  _caisseSyncTimers.set(asin, setTimeout(async ()=>{
+    try{
+      const caisses = getCaissesForAsin(asin);
+      // On tente un op optionnel "set_caisses".
+      // Si ton Apps Script ne le gère pas encore, il répondra unknown op et on ignore.
+      await apiPost({ op:'set_caisses', secret, asin, caisses });
+    }catch(_){ /* ignore */ }
+  }, 900));
 }
 function normAsin(v){
   v=(v||'').toString().trim().toUpperCase();
@@ -584,24 +598,12 @@ async function pullAll(){
     }
 
     if(m2.ok && Array.isArray(m2.mapping)){
-      // Rebuild caisses map from MAPPING if provided (shared between phones)
-      const hasCaisses = m2.mapping.some(x => x && (x.caisses !== undefined && x.caisses !== null && String(x.caisses).trim() !== ''));
-      if(hasCaisses){
-        localStorage.setItem(LS.caisseMap, JSON.stringify({}));
-      }
-
       for(const it of m2.mapping){
         it.fnsku = normFnsku(it.fnsku);
         it.asin = normAsin(it.asin);
-
-        // caisses sync (optional column in MAPPING)
-        if(hasCaisses){
-          const ca = parseCaissesStr(it.caisses);
-          if(it.asin && ca.length){
-            setCaissesForAsin(it.asin, ca);
-          }
-        }
-
+        // Si la colonne caisses existe dans MAPPING, on l'absorbe automatiquement
+        const caField = (it.caisses ?? it.caisse ?? it.caisse_s ?? it.boxes ?? it.caisse_list ?? '');
+        mergeCaissesFromMapping(it.asin, caField);
         await idbPut('mapping', it);
       }
     }
@@ -884,7 +886,7 @@ async function linkFnsku(){
   $('linkStatus').textContent = '⏳ Liaison en cours...';
   $('linkStatus').className = 'muted';
 
-  const resp = await apiPost({op:'link_fnsku', fnsku, asin, device: deviceId, linked_at: new Date().toISOString()});
+  const resp = await apiPost({op:'link_fnsku', fnsku, asin, device: deviceId, linked_at: new Date().toISOString(), caisses: getCaissesForAsin(asin).join(',')});
   if(resp.ok){
     // update local mapping cache
     await idbPut('mapping', {fnsku, asin, linked_at: new Date().toISOString(), device: deviceId});
@@ -926,8 +928,8 @@ async function saveAction({fnsku, asin, caisse, action}){
   localStorage.setItem(LS.lastCaisse, caisse);
   // update caisses per ASIN (multi-caisses)
   applyCaisseAction(asin, caisse, action);
-  // Best-effort: persist caisses in MAPPING so all phones share the same stock
-  syncCaissesToServer(asin);
+    // Optionnel: synchroniser les caisses vers MAPPING (si backend supporte)
+    queueSyncCaissesToMapping(asin);
 
   const id = deviceId + '_' + Date.now().toString(36) + '_' + Math.random().toString(16).slice(2,6);
   const row = {
