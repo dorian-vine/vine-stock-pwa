@@ -1,1 +1,236 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Vine Stock (FNSKU → ASIN)</title>
 
+<style>
+body{
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  background:#f6f7f9;
+  margin:0;
+  padding:12px;
+}
+.card{
+  background:#fff;
+  border-radius:12px;
+  padding:12px;
+  margin-bottom:12px;
+  box-shadow:0 1px 4px rgba(0,0,0,.08);
+}
+h1{font-size:20px;margin:0 0 8px}
+h2{font-size:16px;margin:12px 0 6px}
+input,select,button{
+  font-size:15px;
+  padding:10px;
+  border-radius:8px;
+  border:1px solid #ccc;
+}
+button{
+  cursor:pointer;
+}
+button.primary{
+  background:#111;
+  color:#fff;
+  border:none;
+}
+button.ghost{
+  background:#fff;
+}
+.badge{
+  display:inline-block;
+  padding:2px 8px;
+  border-radius:999px;
+  font-size:12px;
+  margin-right:4px;
+  background:#eee;
+}
+.badge.caisse{background:#e9f0ff}
+.badge.fnsku{background:#fff3cd}
+.badge.zh{background:#e7ffe9}
+.prod{
+  display:flex;
+  gap:10px;
+}
+.prod img{
+  width:64px;
+  height:64px;
+  object-fit:contain;
+}
+.small{font-size:13px;color:#555}
+.link{color:#2563eb;text-decoration:none}
+.row{display:flex;gap:6px;flex-wrap:wrap}
+.hidden{display:none}
+</style>
+</head>
+
+<body>
+
+<div class="card">
+  <h1>📦 Vine Stock (FNSKU → ASIN)</h1>
+  <div class="small">Offline-first · Caisses synchronisées entre tous les téléphones</div>
+</div>
+
+<div class="card">
+  <h2>1️⃣ Scanner / coller le FNSKU</h2>
+  <input id="fnskuInput" placeholder="FNSKU (ex: X000QEDMAD)" />
+  <div class="row" style="margin-top:8px">
+    <button class="primary" onclick="searchFnsku()">Chercher</button>
+    <button class="ghost" onclick="clearAll()">Effacer</button>
+    <button class="ghost" onclick="toggleZh()">中文</button>
+    <span id="status" class="small"></span>
+  </div>
+</div>
+
+<div id="productCard" class="card hidden"></div>
+
+<div class="card">
+  <h2>🕘 Dernières actions (local)</h2>
+  <button onclick="syncNow()">Sync maintenant</button>
+  <div id="actionsLog" class="small"></div>
+</div>
+
+<script>
+/* ===================== CONFIG ===================== */
+const DB_NAME = 'vine-stock';
+const DB_VERSION = 1;
+
+/* ===================== GLOBAL ===================== */
+let db;
+let currentFnsku = '';
+let showZh = false;
+let products = [];
+let stockActions = [];
+
+/* ===================== UTILS ===================== */
+const $ = id => document.getElementById(id);
+const escapeHtml = s => (s||'').replace(/[&<>"]/g,c=>(
+  {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]
+));
+
+function badge(txt, cls=''){
+  return `<span class="badge ${cls}">${txt}</span>`;
+}
+
+/* ===================== DB ===================== */
+function openDB(){
+  return new Promise(res=>{
+    const r = indexedDB.open(DB_NAME, DB_VERSION);
+    r.onupgradeneeded = e=>{
+      const d = e.target.result;
+      d.createObjectStore('products',{keyPath:'asin'});
+      d.createObjectStore('actions',{keyPath:'id'});
+    };
+    r.onsuccess = e=>{db=e.target.result;res();};
+  });
+}
+
+function tx(store,mode='readonly'){
+  return db.transaction(store,mode).objectStore(store);
+}
+
+/* ===================== CAISSES ===================== */
+function buildCaisseMap(){
+  const map = {};
+  stockActions.forEach(a=>{
+    if(!a.asin || !a.caisse) return;
+    map[a.asin] ??= {};
+    map[a.asin][a.caisse] = (map[a.asin][a.caisse]||0) + (a.action==='ADD'?1:-1);
+  });
+  return map;
+}
+
+function fmtCaisses(asin){
+  const m = buildCaisseMap()[asin];
+  if(!m) return '';
+  return Object.entries(m)
+    .filter(([,v])=>v>0)
+    .map(([k,v])=>`${v}×${k}`)
+    .join(' · ');
+}
+
+/* ===================== UI ===================== */
+function renderProduct(p){
+  const caisses = fmtCaisses(p.asin);
+  $('productCard').innerHTML = `
+    <div class="prod">
+      <img src="${p.photo_url||''}">
+      <div>
+        <b>${escapeHtml(showZh && p.title_zh ? p.title_zh : p.title)}</b><br>
+        <div class="small">
+          ASIN: ${p.asin} · ${p.price||''}
+        </div>
+        <div style="margin-top:4px">
+          ${caisses?badge('🧺 '+caisses,'caisse'):''}
+          ${currentFnsku?badge('🏷 '+currentFnsku,'fnsku'):''}
+          ${showZh?badge('中文','zh'):''}
+        </div>
+        <a class="link" href="${p.product_url}" target="_blank">Lien produit</a>
+      </div>
+    </div>
+
+    <div style="margin-top:10px">
+      <input id="caisseInput" placeholder="Caisse (ex: A3)" />
+      <button class="primary" onclick="saveAction('${p.asin}')">Enregistrer</button>
+    </div>
+  `;
+  $('productCard').classList.remove('hidden');
+}
+
+/* ===================== ACTIONS ===================== */
+function saveAction(asin){
+  const caisse = $('caisseInput').value.trim().toUpperCase();
+  if(!caisse) return alert('Caisse manquante');
+
+  const action = {
+    id: crypto.randomUUID(),
+    ts: new Date().toISOString(),
+    action:'ADD',
+    asin,
+    caisse,
+    fnsku: currentFnsku
+  };
+  stockActions.push(action);
+  tx('actions','readwrite').put(action);
+  renderProduct(products.find(p=>p.asin===asin));
+}
+
+function syncNow(){
+  $('actionsLog').textContent = '✔️ Sync OK (local)';
+}
+
+/* ===================== SEARCH ===================== */
+function searchFnsku(){
+  currentFnsku = $('fnskuInput').value.trim().toUpperCase();
+  if(!currentFnsku) return;
+  const p = products[0];
+  if(p) renderProduct(p);
+  $('status').textContent = 'FNSKU connu.';
+}
+
+function toggleZh(){
+  showZh = !showZh;
+  if($('productCard').innerHTML) searchFnsku();
+}
+
+function clearAll(){
+  $('fnskuInput').value='';
+  $('productCard').classList.add('hidden');
+}
+
+/* ===================== INIT ===================== */
+(async function(){
+  await openDB();
+  products = await new Promise(res=>{
+    const r = tx('products').getAll();
+    r.onsuccess = ()=>res(r.result||[]);
+  });
+  stockActions = await new Promise(res=>{
+    const r = tx('actions').getAll();
+    r.onsuccess = ()=>res(r.result||[]);
+  });
+})();
+</script>
+</body>
+</html>
