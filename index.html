@@ -494,13 +494,26 @@ function applyCaisseCountAction(asin, caisse, action){
   setCaisseCountsForAsin(asin, cur);
 }
 function fmtCaisseCountsForAsin(asin){
-  const counts = getCaisseCountsForAsin(asin);
-  const entries = Object.entries(counts);
-  if(!entries.length) return '';
-  // tri: quantité desc puis nom caisse
-  entries.sort((a,b)=> (b[1]-a[1]) || a[0].localeCompare(b[0]));
-  // Affiche toujours la quantité (même 1×) pour éviter toute ambiguïté
-  return entries.map(([c,n]) => `${Math.max(0, Number(n)||0)}×${c}`).join(' · ');
+  // ✅ Multi-caisses + quantités: aggregate from stateMap (per FNSKU) by ASIN
+  asin = (asin||'').toUpperCase().trim();
+  const sm = loadStateMap();
+  const agg = {};
+  for(const [fn, obj] of Object.entries(sm)){
+    if(!obj) continue;
+    const a = (obj.asin||'').toUpperCase().trim();
+    if(asin && a!==asin) continue;
+    const ca = obj.caisses||{};
+    for(const [c,q] of Object.entries(ca)){
+      const n = Number(q)||0;
+      if(n<=0) continue;
+      agg[c] = (agg[c]||0) + n;
+    }
+  }
+  const parts = Object.entries(agg)
+    .sort((x,y)=>x[0].localeCompare(y[0]))
+    .map(([c,n])=>`${c}×${n}`);
+  if(!parts.length) return '';
+  return ' · 🧺 ' + parts.join(' · ');
 }
 
 
@@ -1232,6 +1245,8 @@ async function saveAction({fnsku, asin, caisse, action}){
   localStorage.setItem(LS.lastCaisse, caisse);
   // update caisses per ASIN (multi-caisses)
   applyQtyLocal(fnsku, asin, caisse, action);
+  // refresh product detail instantly (badge in prodHTML)
+  try{ if(selectedProduct){ $('knownProd').innerHTML = prodHTML(selectedProduct, {fnsku: currentFnsku}); } }catch(e){}
   // refresh product detail badge instantly
   if($('confirmCaisses')){
     const badge = stateBadgesForFnsku(fnsku);
