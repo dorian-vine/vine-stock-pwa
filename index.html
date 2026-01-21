@@ -423,10 +423,22 @@ function getCaisseMap(){
   catch(e){ return {}; }
 }
 function getCaissesForAsin(asin){
-  asin = normAsin(asin);
-  const m = getCaisseMap();
-  const v = m[asin];
-  return Array.isArray(v) ? v : [];
+  // Legacy: previously stored per ASIN. Now we use stateMap (per FNSKU) and aggregate by ASIN.
+  asin = (asin||'').toUpperCase().trim();
+  const sm = loadStateMap();
+  const agg = {};
+  for(const [fn, obj] of Object.entries(sm)){
+    if(!obj) continue;
+    const a = (obj.asin||'').toUpperCase().trim();
+    if(asin && a!==asin) continue;
+    const ca = obj.caisses||{};
+    for(const [c,q] of Object.entries(ca)){
+      const n = Number(q)||0;
+      if(n<=0) continue;
+      agg[c] = (agg[c]||0) + n;
+    }
+  }
+  return Object.entries(agg).sort((x,y)=>x[0].localeCompare(y[0])).map(([c,n])=>`${c}×${n}`);
 }
 function setCaissesForAsin(asin, caisses){
   asin = normAsin(asin);
@@ -1148,8 +1160,8 @@ async function showConfirm(){
   $('confirmLink').href = selectedProduct.product_url || '#';
   $('confirmAsin').textContent = 'ASIN: ' + selectedProduct.asin;
   $('confirmPrice').textContent = 'Prix: ' + (selectedProduct.price || '—');
-  const cc = getCaissesForAsin(selectedProduct.asin);
-  $('confirmCaisses').textContent = '🧺 Stock global: ' + (cc.length ? cc.join(' · ') : '—');
+  const badge = stateBadgesForFnsku((currentFnsku||'').toUpperCase().trim());
+  $('confirmCaisses').textContent = '🧺 Stock global: ' + (badge && badge!=='—' ? badge.replace(/\s{2,}/g,' · ') : '—');
 
   const hist = Array.isArray(selectedProduct.history) ? selectedProduct.history : [];
   $('histTable').innerHTML = hist.slice(0,80).map(h=>`
@@ -1220,6 +1232,11 @@ async function saveAction({fnsku, asin, caisse, action}){
   localStorage.setItem(LS.lastCaisse, caisse);
   // update caisses per ASIN (multi-caisses)
   applyQtyLocal(fnsku, asin, caisse, action);
+  // refresh product detail badge instantly
+  if($('confirmCaisses')){
+    const badge = stateBadgesForFnsku(fnsku);
+    $('confirmCaisses').textContent = '🧺 Stock global: ' + (badge && badge!=='—' ? badge.replace(/\s{2,}/g,' · ') : '—');
+  }
 
   const saveKey = [fnsku, asin, caisse, action].join('|');
   const nowMs = Date.now();
