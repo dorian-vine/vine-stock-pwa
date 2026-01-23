@@ -47,37 +47,20 @@
   <span class="pill" id="mapPill">Mapping: ?</span>
 </div>
 <div class="muted" style="margin-top:6px">
-  Scan via 📷 caméra (bouton Scanner) ou via Binary Eye → colle le FNSKU ici. Si inconnu, recherche + double confirmation. Sync auto quand le réseau revient.
+  Scan via Binary Eye → colle le FNSKU ici. Si inconnu, recherche + double confirmation. Sync auto quand le réseau revient.
 </div>
 
 <div class="card">
   <h3 style="margin:0 0 10px">1) Scanner / coller le FNSKU</h3>
   <div class="row">
     <input id="fnsku" placeholder="FNSKU (ex: X000QEDMAD)" style="flex:1;min-width:260px" />
-    <button class="btnGhost" id="btnScanCam">📷 Scanner</button>
+    <button class="btnGhost" id="btnScan">📷</button>
     <button class="btnGhost" id="btnClear">Effacer</button>
   </div>
   <div class="row" style="margin-top:10px">
     <button class="btnPrimary" id="btnLookup">Chercher</button>
     <button class="btnGhost" id="btnSettings">⚙️ Réglages</button>
     <span class="muted" id="status">Prêt.</span>
-  </div>
-</div>
-
-<!-- CAMERA SCAN OVERLAY (Android Chrome) -->
-<div id="scanOverlay" style="display:none; position:fixed; inset:0; background:#000; z-index:9999;">
-  <video id="scanVideo" autoplay playsinline style="width:100%; height:100%; object-fit:cover;"></video>
-
-  <!-- Cadre visuel -->
-  <div style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; pointer-events:none;">
-    <div style="width:min(80vw,420px); height:180px; border:2px solid rgba(255,255,255,.9); border-radius:16px;"></div>
-  </div>
-
-  <!-- Barre top -->
-  <div style="position:absolute; top:0; left:0; right:0; padding:12px; display:flex; gap:10px; align-items:center;">
-    <button id="btnStopScan" class="btn" style="background:#fff; color:#000; border:none; border-radius:12px; padding:10px 12px; font-size:16px;">✕ Fermer</button>
-    <button id="btnTorch" class="btn" style="background:rgba(255,255,255,.15); color:#fff; border:1px solid rgba(255,255,255,.35); border-radius:12px; padding:10px 12px; font-size:16px;">🔦 Flash</button>
-    <div id="scanMsg" style="color:#fff; font-weight:600;"></div>
   </div>
 </div>
 
@@ -181,7 +164,6 @@
     <button class="btnGhost small" id="btnSyncNow">Sync maintenant</button>
     <button class="btnGhost small" id="btnPullNow">Mettre à jour base + mapping</button>
     <button class="btnGhost small" id="btnRebuildState">Rebuild stock (serveur)</button>
-
     <span class="muted" id="syncMsg"></span>
   </div>
   <div style="max-height:260px;overflow:auto;border:1px solid #eee;border-radius:12px;margin-top:10px">
@@ -213,6 +195,13 @@
   </div>
 </div>
 
+<!-- OVERLAY SCAN CAMERA -->
+<div id="scanModal" class="hidden">
+  <video id="video" style="width:100%; height:100%; object-fit:cover;" autoplay playsinline></video>
+  <button class="btnGhost" id="btnCloseScan" style="position:absolute; top:10px; right:10px;">❌</button>
+  <button class="btnGhost hidden" id="btnFlash" style="position:absolute; top:10px; left:10px;">🔦</button>
+</div>
+
 <script>
 /* PWA cache */
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js'); }
@@ -229,8 +218,7 @@ const LS = {
   caisseMap: 'vine_caisse_by_asin',
   caisseCountMap: 'vine_caisse_counts_by_asin',
   actionsCursor: 'vine_actions_cursor',
-  stateMap: 'vine_state_by_fnsku'
-,
+  stateMap: 'vine_state_by_fnsku',
   fnskuMap: 'vine_fnskuMap',
   lang: 'vine_lang'
 };
@@ -252,9 +240,9 @@ const DB_NAME='vine_global', DB_VER=1;
 let db;
 
 /* IndexedDB stores:
-  - products (key asin) => {asin,title,photo_url,product_url,price,orders_count,history}
-  - mapping (key fnsku) => {fnsku,asin,linked_at,device}
-  - actions (auto id) => {id,ts,device,fnsku,asin,caisse,action,synced:false}
+   - products (key asin) => {asin,title,photo_url,product_url,price,orders_count,history}
+   - mapping (key fnsku) => {fnsku,asin,linked_at,device}
+   - actions (auto id) => {id,ts,device,fnsku,asin,caisse,action,synced:false}
 */
 function openDB(){
   return new Promise((res,rej)=>{
@@ -275,195 +263,284 @@ function idbPut(store, val){
     const tx=db.transaction(store,'readwrite');
     tx.objectStore(store).put(val);
     tx.oncomplete=()=>res();
+    tx.onerror=()=>rej(tx.error);
   });
 }
 function idbGet(store, key){
   return new Promise((res,rej)=>{
     const tx=db.transaction(store,'readonly');
-    const req = tx.objectStore(store).get(key);
+    const req=tx.objectStore(store).get(key);
     req.onsuccess=()=>res(req.result||null);
     req.onerror=()=>rej(req.error);
   });
 }
-function idbCursor(store, opt){
+function idbGetAll(store){
   return new Promise((res,rej)=>{
-    const all=[];
     const tx=db.transaction(store,'readonly');
-    tx.objectStore(store).openCursor(opt).onsuccess = (e)=>{
-      const cursor = e.target.result;
-      if(cursor){ all.push(cursor.value); cursor.continue(); }
-      else res(all);
-    };
-    tx.onerror=()=>rej(tx.error);
+    const req=tx.objectStore(store).getAll();
+    req.onsuccess=()=>res(req.result||[]);
+    req.onerror=()=>rej(req.error);
   });
 }
 function idbDelAll(store){
   return new Promise((res,rej)=>{
     const tx=db.transaction(store,'readwrite');
-    tx.objectStore(store).clear();
-    tx.oncomplete=()=>res();
-    tx.onerror=()=>rej(tx.error);
+    const req=tx.objectStore(store).clear();
+    req.onsuccess=()=>res();
+    req.onerror=()=>rej(req.error);
   });
 }
 
-/* Simple helpers */
-const online = ()=> navigator.onLine;
-function setStatus(msg, cls){
-  const st=$('status');
-  st.textContent = msg;
-  st.className = 'muted ' + (cls||'');
+async function pullAllActionsFromServer(){
+  if(!online()) return 0;
+  if(!apiUrl || !secret) return 0;
+  let cursor = 0;
+  let total = 0;
+  while(true){
+    const r = await apiGet(`op=pull_actions&cursor=${cursor}&limit=2000`);
+    if(!r.ok) throw new Error(r.error||'pull_actions failed');
+    const actions = r.actions||[];
+    for(const a of actions){
+      // Store in IDB; mark as synced
+      await idbPut('actions', { ...a, synced:true });
+    }
+    total += actions.length;
+    if(r.next_cursor===null || r.next_cursor===undefined) break;
+    cursor = r.next_cursor;
+    if(actions.length===0) break;
+  }
+  return total;
 }
 
-/* Produit HTML snippet (with image, title, etc.) */
-function prodHTML(prod, opt={}){
-  if(!prod) return '';
-  const {asin,title,photo_url,price,orders_count} = prod;
-  const fn = opt.fnsku || '';
-  const count = (orders_count || 0);
-  const url = prod.product_url || `https://www.amazon.fr/dp/${asin}`;
-  const countStr = count ? (count<10 ? `0${count}` : count) : '—';
-  const caisse = opt.caisse || (localStorage.getItem(LS.caisseMap) ? JSON.parse(localStorage.getItem(LS.caisseMap))[asin]||'' : '');
-  return `<img src="${photo_url||''}" alt="" onerror="this.style.display='none'"/>
-    <div>
-      <h4>${title||asin}</h4>
-      <div class="meta">${fn?`FNSKU : ${fn}<br>`:''}ASIN : ${asin}<br>Prix : ${price||'?'}</div>
-    </div>`;
-}
-
-/* Map stock state to badges by caisse */
-function stateBadgesForFnsku(fnsku){
+/* Auto sync: when online => push then pull */
+let syncLock=false;
+async function autoSync(){
+  if(syncLock) return;
+  if(!online()) return;
+  if(!apiUrl || !secret) return;
+  syncLock=true;
   try{
-    const sm = JSON.parse(localStorage.getItem(LS.stateMap) || '{}');
-    const { asin, caisses } = sm[(fnsku||'').toUpperCase().trim()] || {};
-    if(!caisses) return '—';
-    const parts = Object.entries(caisses).map(([caisse, qty])=>{
-      return `${caisse}: ${qty}`;
-    });
-    return parts.length ? parts.join('   ') : '—';
-  }catch(e){
-    return '—';
+    await pushActions();
+    // Phase 2 (recommandée) : on pull STOCK_ACTIONS et on reconstruit les caisses globales
+    try{
+      const r = await pullStockActions();
+      if(r && r.pulled){
+        $('syncMsg').textContent = `✅ Stock actions mises à jour (+${r.pulled})`;
+      }
+    }catch(e){
+      // on n'empêche pas la suite (base + mapping)
+      $('syncMsg').textContent = '⚠️ Stock actions: '+(e.message||e);
+    }
+    await pullAll();
+  }finally{
+    syncLock=false;
   }
 }
 
-/* MAPPING UTILS (norm) */
-function normFnsku(val){ return (val||'').toString().trim().toUpperCase(); }
-function normAsin(val){ return (val||'').toString().trim().toUpperCase(); }
+/* Lookup flow */
+let currentFnsku='', selectedProduct=null;
 
-/* Lookup produit par FNSKU (local puis online fallback) */
 async function lookupFnsku(){
-  const fnsku = normFnsku($('fnsku').value);
-  if(!fnsku){ alert('FNSKU manquant'); return; }
-  currentFnsku = fnsku;
-  setStatus('⏳ Recherche FNSKU…', '');
-  selectedProduct = null;
+  const rawIn = ($('fnsku').value||'').trim();
+
+  // ✅ Bonus : tu peux coller un ASIN (ou une URL Amazon) dans le champ "FNSKU"
+  // - Si un ASIN est détecté, on affiche le produit sans passer par le mapping.
+  // - Si une seule ligne de mapping pointe vers cet ASIN, on remplace automatiquement
+  //   le champ par le FNSKU correspondant pour permettre l'enregistrement.
+  const urlAsin = rawIn.match(/\b([A-Z0-9]{10})\b/i);
+  const maybeAsin = rawIn.includes('/dp/') || rawIn.includes('amazon.') ? (urlAsin ? urlAsin[1] : '') : rawIn;
+  const asinCandidate = normAsin(maybeAsin);
+  const isAsin = /^[A-Z0-9]{10}$/.test(asinCandidate);
+
+  if(isAsin){
+    // Essayez de retrouver un FNSKU unique depuis le mapping (pour autoriser "Enregistrer")
+    try{
+      const mpAll = await idbGetAll('mapping');
+      const hits = mpAll.filter(x => x && normAsin(x.asin) === asinCandidate && x.fnsku);
+      if(hits.length === 1){
+        currentFnsku = normFnsku(hits[0].fnsku);
+        $('fnsku').value = currentFnsku;
+      }else{
+        currentFnsku = ''; // affichage OK, mais pas d'"Enregistrer" sans FNSKU
+      }
+    }catch(_){ currentFnsku = ''; }
+
+    // Affiche le produit directement depuis la base (products)
+    const p = await idbGet('products', asinCandidate);
+    if(!p){
+      setStatus('ASIN reconnu, mais produit non trouvé en local. Fais "Mettre à jour base + mapping".', 'warn');
+      showOnly('settingsBox');
+      return;
+    }
+    selectedProduct = p;
+    $('knownProd').innerHTML = prodHTML(p, {fnsku: currentFnsku});
+    // Affiche les caisses (avec quantités) juste à côté des infos produit
+    // prodHTML() inclut deja le badge "caisses" (avec quantites)
+    proposeCaisse();
+    setStatus(currentFnsku ? 'ASIN reconnu → FNSKU auto (unique).' : 'ASIN reconnu (lecture seule).', 'ok');
+    showOnly('knownBox');
+    return;
+  }
+
+  // Mode normal : FNSKU
+  currentFnsku = normFnsku(rawIn);
+  $('fnsku').value = currentFnsku;
+  if(!currentFnsku){ setStatus('FNSKU vide', 'warn'); return; }
+
   showOnly(null);
   $('knownBox').classList.add('hidden');
   $('searchBox').classList.add('hidden');
   $('confirmBox').classList.add('hidden');
   $('afterLinkBox').classList.add('hidden');
 
-  // 1️⃣ local mapping
-  const local = await idbGet('mapping', fnsku);
-  if(local){
-    const asin = local.asin;
-    const prod = await idbGet('products', asin);
-    if(prod){
-      selectedProduct = prod;
-      $('knownProd').innerHTML = prodHTML(prod, {fnsku});
-      $('knownBox').classList.remove('hidden');
-      setStatus('✅ FNSKU connu. Produit chargé.', 'ok');
-      return;
-    }
-  }
+  setStatus('Recherche mapping...', '');
+  const mapped = await idbGet('mapping', currentFnsku);
 
-  // 2️⃣ search online fallback
-  $('searchBox').classList.remove('hidden');
-  $('q').value = fnsku;
-  doSearch();
-}
-
-/* Rechercher produit via mot-clé ou ASIN (base locale uniquement) */
-async function doSearch(){
-  const q = ($('q').value||'').toString().trim();
-  const filter = ($('accountFilter').value||'').toString().trim();
-  $('results').innerHTML = '⏳ Chargement…';
-  const products = (await idbCursor('products')) || [];
-  const arr = products.filter(p=>{
-    const title = (p.title||'').toLowerCase();
-    const asin = (p.asin||'').toUpperCase();
-    if(!q) return false;
-    const qry = q.toLowerCase();
-    if(title.includes(qry) || asin.includes(q.toUpperCase())){
-      if(filter && p.account !== filter) return false;
-      return true;
+  if(mapped && mapped.asin){
+    const asin = normAsin(mapped.asin);
+    const p = await idbGet('products', asin);
+    if(p){
+      $('knownProd').innerHTML = prodHTML(p, {fnsku: currentFnsku});
+    }else{
+      $('knownProd').innerHTML = `<div class="muted warn">Produit non trouvé dans la base locale (ASIN: ${asin}). Fais une mise à jour en ligne.</div>`;
     }
-    return false;
-  });
-  if(!arr.length){
-    $('results').innerHTML = '<div class="muted" style="padding:8px">Aucun résultat.</div>';
+    proposeCaisse();
+    showOnly('knownBox');
+    setStatus('FNSKU connu.', 'ok');
     return;
   }
-  $('results').innerHTML = arr.map(prod=>{
-    const asin = prod.asin;
-    const title = prod.title;
-    const photo = prod.photo_url;
-    const price = prod.price;
-    const account = prod.account;
-    return `<div class="item">
-      <div class="prod" data-asin="${asin}">
-        <img src="${photo||''}" alt="" onerror="this.style.display='none'"/>
-        <div>
-          <h4>${title||asin}</h4>
-          <div class="meta">${account?account+'<br>':''}ASIN : ${asin}<br>Prix : ${price||'?'}</div>
-        </div>
+
+  // Unknown => search
+  showOnly('searchBox');
+  setStatus('FNSKU inconnu → recherche produit.', 'warn');
+  $('q').value = '';
+  $('results').innerHTML = '';
+  $('q').focus();
+}
+
+/* Search products */
+async function doSearch(){
+  const qRaw = ($('q').value||'').trim();
+  const q = qRaw.toUpperCase();
+  const qFold = foldText(qRaw);
+  const all = await idbGetAll('products');
+
+  // Remplit le filtre compte (une seule fois) à partir des données locales
+  const selEl = $('accountFilter');
+  if(selEl && selEl.options && selEl.options.length <= 1){
+    const emails = collectAccountEmails(all); // triés
+    for(const em of emails){
+      const opt = document.createElement('option');
+      opt.value = em;
+      opt.textContent = aliasFromEmail(em);
+      selEl.appendChild(opt);
+    }
+  }
+
+  const accEmail = selEl ? (selEl.value||'').trim().toLowerCase() : '';
+
+  if(!all.length){
+    $('results').innerHTML = `<div class="item"><div class="muted err">Base produits vide. Va dans ⚙️ Réglages, puis “Mettre à jour base + mapping”.</div></div>`;
+    return;
+  }
+
+  const filtered = all
+    .filter(p => {
+      const hay = (p.brand+' '+p.title+' '+p.asin).toUpperCase();
+      return (!accEmail || (p.account_email||'').toLowerCase()===accEmail)
+        && (hay.includes(q) || foldText(hay).includes(qFold));
+    })
+    .slice(0,60);
+
+  if(!filtered.length){
+    $('results').innerHTML = `<div class="item"><div class="muted warn">Aucun résultat.</div></div>`;
+    return;
+  }
+
+  $('results').innerHTML = filtered.map(p=>`
+    <div class="item">
+      <div class="prod">${prodHTML(p)}</div>
+      <div class="row" style="margin-top:8px">
+        <button class="btnPrimary small" data-asin="${p.asin}">Sélectionner</button>
+        <span class="pill">cmd: ${p.orders_count||0}</span>
       </div>
-    </div>`;
-  }).join('');
-  // click handler
-  [...document.querySelectorAll('.prod[data-asin]')].forEach(el=>{
-    el.onclick = async ()=>{
-      const asin = el.dataset.asin;
-      const prod = await idbGet('products', asin);
-      if(!prod){ alert('Non trouvé en base locale, fais “Mettre à jour base” dans Réglages.'); return; }
-      selectedProduct = prod;
-      $('confirmProd').innerHTML = prodHTML(prod);
-      $('confirmAsin').textContent = `ASIN: ${asin}`;
-      $('confirmPrice').textContent = `Prix: ${prod.price||'?'}`;
-      $('confirmLink').href = prod.product_url || `https://www.amazon.fr/dp/${asin}`;
-      const badge = stateBadgesForFnsku(currentFnsku);
-      $('confirmCaisses').textContent = '🧺 Stock global: ' + (badge && badge!=='—' ? badge.replace(/\s{2,}/g,' · ') : '—');
-      showOnly('confirmBox');
-      setStatus('Choisis l’ASIN correspondant.', '');
+    </div>
+  `).join('');
+
+  // bind select buttons
+  $('results').querySelectorAll('button[data-asin]').forEach(btn=>{
+    btn.onclick=async ()=>{
+      const asin = btn.getAttribute('data-asin');
+      selectedProduct = await idbGet('products', asin);
+      await showConfirm();
     };
   });
 }
+async function showConfirm(){
+  if(!selectedProduct) return;
+  showOnly('confirmBox');
+  $('confirmProd').innerHTML = prodHTML(selectedProduct);
+  $('confirmLink').href = selectedProduct.product_url || '#';
+  $('confirmAsin').textContent = 'ASIN: ' + selectedProduct.asin;
+  $('confirmPrice').textContent = 'Prix: ' + (selectedProduct.price || '—');
+  const badge = stateBadgesForFnsku((currentFnsku||'').toUpperCase().trim());
+  $('confirmCaisses').textContent = '🧺 Stock global: ' + (badge && badge!=='—' ? badge.replace(/\s{2,}/g,' · ') : '—');
 
-/* Lier FNSKU → ASIN sélectionné */
+  const hist = Array.isArray(selectedProduct.history) ? selectedProduct.history : [];
+  $('histTable').innerHTML = hist.slice(0,80).map(h=>`
+    <tr><td>${escapeHtml((h.order_date||'').toString())}</td><td>${escapeHtml((h.email||'').toString())}</td></tr>
+  `).join('') || `<tr><td colspan="2" class="muted">Aucun historique en cache.</td></tr>`;
+
+  $('linkStatus').textContent = '';
+}
+
 async function linkFnsku(){
-  if(!currentFnsku || !selectedProduct){ alert('Données manquantes'); return; }
+  if(!selectedProduct) return;
   const fnsku = currentFnsku;
   const asin = selectedProduct.asin;
-  try{
-    // persist mapping locally
-    const row = { fnsku, asin, linked_at: new Date().toISOString(), device: deviceId };
-    await idbPut('mapping', row);
-    // mapping pill and overlay (no overlay here)
-    $('mapPill').textContent = 'Mapping: ✅';
-    $('mapPill').className = 'pill ok';
-    // UI changes
-    $('afterProd').innerHTML = prodHTML(selectedProduct, {fnsku});
-    $('confirmBox').classList.add('hidden');
-    $('afterLinkBox').classList.remove('hidden');
-    setStatus('✅ Lien FNSKU → ASIN créé localement.', 'ok');
-  }catch(e){
-    $('linkStatus').textContent = '❌ ' + e;
+
+  if(!online()){
+    $('linkStatus').textContent = '❌ Impossible de lier sans internet (global après synchro).';
     $('linkStatus').className = 'muted err';
+    return;
+  }
+  if(!apiUrl || !secret){
+    $('linkStatus').textContent = '❌ Réglages API manquants.';
+    $('linkStatus').className = 'muted err';
+    return;
+  }
+
+  $('linkStatus').textContent = '⏳ Liaison en cours...';
+  $('linkStatus').className = 'muted';
+
+  const resp = await apiPost({op:'link_fnsku', fnsku, asin, device: deviceId, linked_at: new Date().toISOString()});
+  if(resp.ok){
+    // update local mapping cache
+    await idbPut('mapping', {fnsku, asin, linked_at: new Date().toISOString(), device: deviceId});
+    $('linkStatus').textContent = '✅ Lien créé';
+    $('linkStatus').className = 'muted ok';
+
+    // proceed to action box
+    $('afterProd').innerHTML = prodHTML(selectedProduct, {fnsku: currentFnsku});
+    proposeCaisse();
+    showOnly('afterLinkBox');
+    setStatus('Lien OK → enregistre le rangement.', 'ok');
+    await refreshPills();
+  }else{
+    const e = resp.error || '';
+    if(e.startsWith('fnsku_already_linked:')){
+      const already = e.split(':')[1] || '';
+      $('linkStatus').textContent = '⚠️ Déjà lié à ' + already;
+      $('linkStatus').className = 'muted warn';
+      // pull mapping to update
+      await pullAll();
+    }else{
+      $('linkStatus').textContent = '❌ ' + e;
+      $('linkStatus').className = 'muted err';
+    }
   }
 }
 
-/* Sauvegarde action (local + try sync) */
-let lastSaveKey = '';
-let lastSaveAt = 0;
 async function saveAction({fnsku, asin, caisse, action}){
   fnsku = normFnsku(fnsku);
   asin = normAsin(asin);
@@ -514,136 +591,70 @@ async function saveAction({fnsku, asin, caisse, action}){
   autoSync();
 }
 
-/* ===== Camera scan (Android Chrome) ===== */
-let scanStream = null;
-let scanTimer = null;
-let lastScanValue = '';
-let scanTrack = null;
-let torchOn = false;
+/* Camera scan (BarcodeDetector) */
+let stream = null, track = null, scanning = false, scanningInterval = null, flashOn = false;
 
-function buzz_(){
-  try{ if(navigator.vibrate) navigator.vibrate(60); }catch(e){}
-}
-function beep_(){
-  try{
-    const ctx = new (window.AudioContext||window.webkitAudioContext)();
-    const o = ctx.createOscillator(), g = ctx.createGain();
-    o.connect(g); g.connect(ctx.destination);
-    o.frequency.value = 880; g.gain.value = 0.05;
-    o.start();
-    setTimeout(()=>{ o.stop(); ctx.close(); }, 80);
-  }catch(e){}
-}
-
-async function setTorch_(on){
-  torchOn = !!on;
-  const btn = $('btnTorch');
-  try{
-    if(!scanTrack) throw new Error('no track');
-    const caps = scanTrack.getCapabilities ? scanTrack.getCapabilities() : {};
-    if(!caps || !('torch' in caps) || caps.torch !== true) throw new Error('torch not supported');
-    await scanTrack.applyConstraints({ advanced: [{ torch: torchOn }] });
-    if(btn) btn.style.opacity = torchOn ? '1' : '0.7';
-  }catch(e){
-    // torch not supported
-    if(btn) btn.style.opacity = '0.4';
-  }
-}
-
-async function startScan_(){
-  const overlay = $('scanOverlay');
-  const video = $('scanVideo');
-  const msg = $('scanMsg');
-  const btnTorch = $('btnTorch');
-
-  if(!overlay || !video || !msg){
-    setStatus('Scan caméra: UI manquante.', 'err');
+async function startScan() {
+  if (scanning) return;
+  if (!('BarcodeDetector' in window)) {
+    alert('Scan non supporté sur ce navigateur');
     return;
   }
-
-  if(!('BarcodeDetector' in window)){
-    overlay.style.display = 'block';
-    msg.textContent = 'BarcodeDetector non supporté (Chrome Android récent requis).';
+  scanning = true;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+  } catch(e) {
+    alert('Erreur accès caméra: ' + e.message);
+    scanning = false;
     return;
   }
-
-  // Stop any previous session
-  stopScan_();
-
-  overlay.style.display = 'block';
-  msg.textContent = 'Ouverture caméra…';
-
-  scanStream = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: { ideal: 'environment' } },
-    audio: false
-  });
-
-  video.srcObject = scanStream;
-  await video.play();
-
-  // Track for torch
-  scanTrack = scanStream.getVideoTracks ? (scanStream.getVideoTracks()[0] || null) : null;
-  torchOn = false;
-  if(btnTorch){
-    btnTorch.style.opacity = '0.7';
-    // Enable/disable torch button depending on capabilities
-    try{
-      const caps = scanTrack && scanTrack.getCapabilities ? scanTrack.getCapabilities() : {};
-      const supported = !!(caps && ('torch' in caps) && caps.torch === true);
-      btnTorch.style.display = supported ? 'inline-block' : 'none';
-    }catch(_){
-      btnTorch.style.display = 'none';
-    }
+  track = stream.getVideoTracks()[0];
+  // Show overlay
+  $('scanModal').classList.remove('hidden');
+  // Show camera stream
+  $('video').srcObject = stream;
+  // Handle flash availability
+  if (track.getCapabilities().torch) {
+    $('btnFlash').classList.remove('hidden');
+  } else {
+    $('btnFlash').classList.add('hidden');
   }
-
-  msg.textContent = 'Scanne le code…';
-
-  const detector = new BarcodeDetector({
-    formats: ['code_128','ean_13','ean_8','qr_code','data_matrix','itf']
-  });
-
-  lastScanValue = '';
-
-  scanTimer = setInterval(async ()=>{
-    try{
-      const codes = await detector.detect(video);
-      if(!codes || !codes.length) return;
-
-      const raw = (codes[0].rawValue || '').trim();
-      if(!raw) return;
-
-      if(raw === lastScanValue) return;
-      lastScanValue = raw;
-
-      stopScan_();
-      beep_(); buzz_();
-
-      $('fnsku').value = raw;
-      $('fnsku').dispatchEvent(new Event('input', {bubbles:true}));
-      if(typeof lookupFnsku === 'function') await lookupFnsku();
-    }catch(e){
-      // ignore intermittent errors
+  // Create barcode detector
+  const detector = new BarcodeDetector({ formats: ['code_128', 'code_39'] });
+  // Start scanning periodically
+  scanningInterval = setInterval(async () => {
+    try {
+      const barcodes = await detector.detect($('video'));
+      if (barcodes.length > 0) {
+        const code = (barcodes[0].rawValue || '').trim();
+        if (code) {
+          // Stop scanning
+          clearInterval(scanningInterval);
+          stream.getTracks().forEach(t => t.stop());
+          // Feedback (beep and vibration)
+          if (navigator.vibrate) navigator.vibrate(200);
+          try {
+            (new Audio("data:audio/wav;base64,//uQRAAAAWMSLwUIYAAsYkXgoQwAEaYLWfkWgAI0wWs/ItAAAGDgYtAgAyN+QWaAAihwMWm4G8QQRDiMcCBcH3Cc+CDv/7xA4Tvh9Rz/y8QADBwMWgQAZG/ILNAARQ4GLTcDeIIIhxGOBAuD7hOfBB3/94gcJ3w+o5/5eIAIAAAVwWgQAVQ2ORaIQwEMAJiDg95G4nQL7mQVWI6GwRcfsZAcsKkJvxgxEjzFUgfHoSQ9Qq7KNwqHwuB13MA4a1q/DmBrHgPcmjiGoh//EwC5nGPEmS4RcfkVKOhJf+WOgoxJclFz3kgn//dBA+ya1GhurNn8zb//9NNutNuhz31f////9vt///z+IdAEAAAK4LQIAKobHItEIYCGAExBwe8jcToF9zIKrEdDYIuP2MgOWFSE34wYiR5iqQPj0JIeoVdlG4VD4XA67mAcNa1fhzA1jwHuTRxDUQ//iYBczjHiTJcIuPyKlHQkv/LHQUYkuSi57yQT//uggfZNajQ3Vmz+Zt//+mm3Wm3Q576v////+32///5/EOgAAADVghQAAAAA//uQZAUAB1WI0PZugAAAAAoQwAAAEk3nRd2qAAAAACiDgAAAAAAABCqEEQRLCgwpBGMlJkIz8jKhGvj4k6jzRnqasNKIeoh5gI7BJaC1A1AoNBjJgbyApVS4IDlZgDU5WUAxEKDNmmALHzZp0Fkz1FMTmGFl1FMEyodIavcCAUHDWrKAIA4aa2oCgILEBupZgHvAhEBcZ6joQBxS76AgccrFlczBvKLC0QI2cBoCFvfTDAo7eoOQInqDPBtvrDEZBNYN5xwNwxQRfw8ZQ5wQVLvO8OYU+mHvFLlDh05Mdg7BT6YrRPpCBznMB2r//xKJjyyOh+cImr2/4doscwD6neZjuZR4AgAABYAAAABy1xcdQtxYBYYZdifkUDgzzXaXn98Z0oi9ILU5mBjFANmRwlVJ3/6jYDAmxaiDG3/6xjQQCCKkRb/6kg/wW+kSJ5//rLobkLSiKmqP/0ikJuDaSaSf/6JiLYLEYnW/+kXg1WRVJL/9EmQ1YZIsv/6Qzwy5qk7/+tEU0nkls3/zIUMPKNX/6yZLf+kFgAfgGyLFAUwY//uQZAUABcd5UiNPVXAAAApAAAAAE0VZQKw9ISAAACgAAAAAVQIygIElVrFkBS+Jhi+EAuu+lKAkYUEIsmEAEoMeDmCETMvfSHTGkF5RWH7kz/ESHWPAq/kcCRhqBtMdokPdM7vil7RG98A2sc7zO6ZvTdM7pmOUAZTnJW+NXxqmd41dqJ6mLTXxrPpnV8avaIf5SvL7pndPvPpndJR9Kuu8fePvuiuhorgWjp7Mf/PRjxcFCPDkW31srioCExivv9lcwKEaHsf/7ow2Fl1T/9RkXgEhYElAoCLFtMArxwivDJJ+bR1HTKJdlEoTELCIqgEwVGSQ+hIm0NbK8WXcTEI0UPoa2NbG4y2K00JEWbZavJXkYaqo9CRH")).play();
+          } catch(e) {}
+          // Insert code and close overlay
+          $('fnsku').value = code.toUpperCase();
+          $('scanModal').classList.add('hidden');
+          scanning = false;
+          // Trigger lookup if available
+          if (typeof lookupFnsku === 'function') {
+            lookupFnsku();
+          }
+        }
+      }
+    } catch(e) {
+      console.error(e);
     }
-  }, 180);
-}
-
-function stopScan_(){
-  if(scanTimer){ clearInterval(scanTimer); scanTimer = null; }
-  // turn torch off before stopping
-  try{ if(scanTrack) scanTrack.applyConstraints({ advanced: [{ torch: false }] }); }catch(e){}
-  torchOn = false;
-  scanTrack = null;
-
-  if(scanStream){
-    try{ scanStream.getTracks().forEach(t=>t.stop()); }catch(e){}
-    scanStream = null;
-  }
-  const overlay = $('scanOverlay');
-  if(overlay) overlay.style.display = 'none';
+  }, 300);
 }
 
 /* UI bindings */
 $('btnLookup').onclick = lookupFnsku;
+$('btnScan').onclick = startScan;
 $('btnClear').onclick = ()=>{
   $('fnsku').value='';
   $('q').value='';
@@ -658,16 +669,21 @@ $('btnClear').onclick = ()=>{
   setStatus('Prêt.', '');
   $('fnsku').focus();
 };
-
-$('btnScanCam').onclick = ()=>{
-  startScan_().catch(err=>{
-    $('scanOverlay').style.display = 'block';
-    $('scanMsg').textContent = 'Erreur caméra: ' + (err.message || err);
-  });
+$('btnCloseScan').onclick = ()=>{
+  if (scanningInterval) clearInterval(scanningInterval);
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  $('scanModal').classList.add('hidden');
+  scanning = false;
+  flashOn = false;
 };
-$('btnStopScan') && ($('btnStopScan').onclick = stopScan_);
-$('btnTorch') && ($('btnTorch').onclick = ()=>{ setTorch_(!torchOn); });
-
+$('btnFlash').onclick = ()=>{
+  if (track && track.getCapabilities().torch) {
+    flashOn = !flashOn;
+    try {
+      track.applyConstraints({ advanced: [{ torch: flashOn }] });
+    } catch(e) {}
+  }
+};
 $('btnSearch').onclick = doSearch;
 $('accountFilter').addEventListener('change', ()=>doSearch());
 $('q').addEventListener('keydown', (e)=>{ if(e.key==='Enter') doSearch(); });
@@ -693,7 +709,8 @@ $('btnSettings').onclick = ()=>{
     // init langue
     const lm = $('langMode');
     if(lm){ lm.value = getLang(); }
-  $('settingsBox').classList.toggle('hidden'); };
+  $('settingsBox').classList.toggle('hidden');
+};
 // Langue (FR/中文)
 $('langMode') && ($('langMode').onchange = ()=>{
   setLang($('langMode').value);
