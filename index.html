@@ -1361,14 +1361,11 @@ $('btnSyncNow').onclick = autoSync;
 $('btnPullNow').onclick = pullAll;
 $('btnRebuildState').onclick = async ()=>{
   try{
-    $('syncMsg').textContent = '⏳ Rebuild stock serveur...';
-    const r = await apiGet('op=rebuild_state');
-    if(!r.ok) throw new Error(r.error||'rebuild_state failed');
-
-    const p = await apiGet('op=pull_state');
+    $('syncMsg').textContent = '⏳ Rechargement du stock central...';
+    const p = await apiGet({op:'pull_state'});
     if(!p.ok) throw new Error(p.error||'pull_state failed');
 
-    // Update local state map from server response (no stale cache)
+    // Écrase complètement l'état local avec la vérité serveur (STOCK_STATE)
     const arr = p.state || [];
     const sm = {};
     for(const it of arr){
@@ -1381,12 +1378,12 @@ $('btnRebuildState').onclick = async ()=>{
     }
     saveStateMap(sm);
 
-    // Re-render current product so the badge next to the compte updates immediately
+    // Re-render product detail if visible
     try{ if(selectedProduct){ $('knownProd').innerHTML = prodHTML(selectedProduct, {fnsku: currentFnsku}); } }catch(e){}
     try{ if($('confirmCaisses')){ const b = stateBadgesForFnsku((currentFnsku||'').toUpperCase().trim()); $('confirmCaisses').textContent = '🧺 Stock global: ' + (b && b!=='—' ? b.replace(/\s{2,}/g,' · ') : '—'); } }catch(e){}
 
     refreshPills();
-    $('syncMsg').textContent = `✅ Rebuild OK — rebuilt=${r.rebuilt||0} — pull_state=${arr.length}`;
+    $('syncMsg').textContent = `✅ Stock central rechargé — lignes STOCK_STATE=${arr.length}`;
   }catch(e){
     $('syncMsg').textContent = '❌ Rebuild: '+(e.message||e);
   }
