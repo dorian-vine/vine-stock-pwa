@@ -54,7 +54,6 @@
   <h3 style="margin:0 0 10px">1) Scanner / coller le FNSKU</h3>
   <div class="row">
     <input id="fnsku" placeholder="FNSKU (ex: X000QEDMAD)" style="flex:1;min-width:260px" />
-    <button class="btnGhost" id="btnScan">📷</button>
     <button class="btnGhost" id="btnClear">Effacer</button>
   </div>
   <div class="row" style="margin-top:10px">
@@ -164,6 +163,7 @@
     <button class="btnGhost small" id="btnSyncNow">Sync maintenant</button>
     <button class="btnGhost small" id="btnPullNow">Mettre à jour base + mapping</button>
     <button class="btnGhost small" id="btnRebuildState">Rebuild stock (serveur)</button>
+
     <span class="muted" id="syncMsg"></span>
   </div>
   <div style="max-height:260px;overflow:auto;border:1px solid #eee;border-radius:12px;margin-top:10px">
@@ -195,13 +195,6 @@
   </div>
 </div>
 
-<!-- OVERLAY SCAN CAMERA -->
-<div id="scanModal" class="hidden">
-  <video id="video" style="width:100%; height:100%; object-fit:cover;" autoplay playsinline></video>
-  <button class="btnGhost" id="btnCloseScan" style="position:absolute; top:10px; right:10px;">❌</button>
-  <button class="btnGhost hidden" id="btnFlash" style="position:absolute; top:10px; left:10px;">🔦</button>
-</div>
-
 <script>
 /* PWA cache */
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js'); }
@@ -218,12 +211,13 @@ const LS = {
   caisseMap: 'vine_caisse_by_asin',
   caisseCountMap: 'vine_caisse_counts_by_asin',
   actionsCursor: 'vine_actions_cursor',
-  stateMap: 'vine_state_by_fnsku',
+  stateMap: 'vine_state_by_fnsku'
+,
   fnskuMap: 'vine_fnskuMap',
   lang: 'vine_lang'
 };
 
-const deviceId = localStorage.getItem(LS.device) || (()=>{
+const deviceId = localStorage.getItem(LS.device) || (()=> {
   const v='phone_'+Math.random().toString(16).slice(2,8);
   localStorage.setItem(LS.device, v);
   return v;
@@ -240,9 +234,9 @@ const DB_NAME='vine_global', DB_VER=1;
 let db;
 
 /* IndexedDB stores:
-   - products (key asin) => {asin,title,photo_url,product_url,price,orders_count,history}
-   - mapping (key fnsku) => {fnsku,asin,linked_at,device}
-   - actions (auto id) => {id,ts,device,fnsku,asin,caisse,action,synced:false}
+  - products (key asin) => {asin,title,photo_url,product_url,price,orders_count,history}
+  - mapping (key fnsku) => {fnsku,asin,linked_at,device}
+  - actions (auto id) => {id,ts,device,fnsku,asin,caisse,action,synced:false}
 */
 function openDB(){
   return new Promise((res,rej)=>{
@@ -311,6 +305,688 @@ async function pullAllActionsFromServer(){
   }
   return total;
 }
+
+
+// --- Anti-duplicate save (multi-device safe) ---
+let lastSaveKey = '';
+let lastSaveAt = 0;
+
+// Fast hash (FNV-1a 32-bit) to generate stable IDs without crypto APIs
+function fnv1a32(str){
+  let h = 0x811c9dc5;
+  for(let i=0;i<str.length;i++){
+    h ^= str.charCodeAt(i);
+    h = (h + ((h<<1) + (h<<4) + (h<<7) + (h<<8) + (h<<24))) >>> 0;
+  }
+  return h >>> 0;
+}
+
+function makeStableActionId(fnsku, asin, caisse, action){
+  const now = Date.now();
+  const bucket = Math.floor(now / 3000); // 3s bucket (prevents double clicks / retries)
+  const key = [deviceId, fnsku, asin, caisse, action, bucket].join('|');
+  return deviceId + '_' + fnv1a32(key).toString(16);
+}
+
+async function rebuildCaisseStateFromActions(){
+  const acts = await idbGetAll('actions');
+  acts.sort((a,b)=>{
+    const ta = Date.parse(a.ts||'') || 0;
+    const tb = Date.parse(b.ts||'') || 0;
+    if(ta!==tb) return ta-tb;
+    return String(a.id||'').localeCompare(String(b.id||''));
+  });
+  const caisseByAsin = {};
+  const caisseCounts = {};
+  for(const a of acts){
+    const asin = (a.asin||'').toUpperCase().trim();
+    if(!asin) continue;
+    const action = (a.action||'').toUpperCase().trim();
+    const caisse = (a.caisse||'').toUpperCase().trim();
+
+    if(action==='SOLD' || action==='REMOVE'){
+      caisseByAsin[asin] = '';
+    } else if(action==='ADD' || action==='MOVE'){
+      caisseByAsin[asin] = caisse;
+    }
+
+    // Optional counts by (asin,caisse) for UI badges
+    const key = asin+'||'+(caisse||'');
+    const delta = (action==='SOLD'||action==='REMOVE') ? -1 : 1;
+    caisseCounts[key] = (caisseCounts[key]||0) + delta;
+  }
+  localStorage.setItem(LS.caisseMap, JSON.stringify(caisseByAsin));
+  localStorage.setItem(LS.caisseCountMap, JSON.stringify(caisseCounts));
+}
+
+
+
+function loadStateMap(){
+  try{ return JSON.parse(localStorage.getItem(LS.stateMap)||'{}')||{}; }catch(e){ return {}; }
+}
+function saveStateMap(m){
+  localStorage.setItem(LS.stateMap, JSON.stringify(m||{}));
+}
+function stateBadgesForFnsku(fnsku){
+  const sm = loadStateMap();
+  const o = sm[(fnsku||'').toUpperCase().trim()];
+  if(!o || !o.caisses) return '—';
+  const parts = [];
+  for(const [c, q] of Object.entries(o.caisses)){
+    const n = Number(q)||0;
+    if(n>0) parts.push(`${c}×${n}`);
+  }
+  return parts.length ? parts.sort().join('  ') : '—';
+}
+function applyQtyLocal(fnsku, asin, caisse, action){
+  fnsku = (fnsku||'').toUpperCase().trim();
+  asin = (asin||'').toUpperCase().trim();
+  caisse = (caisse||'').toUpperCase().trim();
+  if(!fnsku || !caisse) return;
+  const sm = loadStateMap();
+  if(!sm[fnsku]) sm[fnsku] = { asin: asin || '', caisses: {} };
+  if(asin) sm[fnsku].asin = asin;
+  if(!sm[fnsku].caisses) sm[fnsku].caisses = {};
+  const cur = Number(sm[fnsku].caisses[caisse]||0)||0;
+  let delta = 0;
+  const a = (action||'').toUpperCase().trim();
+  if(a==='ADD') delta = 1;
+  else if(a==='REMOVE' || a==='SOLD') delta = -1;
+  const nxt = Math.max(0, cur + delta);
+  sm[fnsku].caisses[caisse] = nxt;
+  saveStateMap(sm);
+}
+
+
+/* Helpers */
+function setStatus(msg, cls=''){
+  $('status').textContent = msg;
+  $('status').className = 'muted ' + cls;
+}
+function online(){ return navigator.onLine; }
+
+function normFnsku(v){
+  return (v||'').toString().trim().toUpperCase();
+}
+
+// Recherche non sensible aux accents (é=e, à=a, ç=c)
+function foldText(s){
+  return (s||'').toString()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g,'')
+    .toUpperCase();
+}
+
+// Caisses par ASIN (plusieurs caisses possibles)
+function getCaisseMap(){
+  try{ return JSON.parse(localStorage.getItem(LS.caisseMap) || '{}') || {}; }
+  catch(e){ return {}; }
+}
+function getCaissesForAsin(asin){
+  // Legacy: previously stored per ASIN. Now we use stateMap (per FNSKU) and aggregate by ASIN.
+  asin = (asin||'').toUpperCase().trim();
+  const sm = loadStateMap();
+  const agg = {};
+  for(const [fn, obj] of Object.entries(sm)){
+    if(!obj) continue;
+    const a = (obj.asin||'').toUpperCase().trim();
+    if(asin && a!==asin) continue;
+    const ca = obj.caisses||{};
+    for(const [c,q] of Object.entries(ca)){
+      const n = Number(q)||0;
+      if(n<=0) continue;
+      agg[c] = (agg[c]||0) + n;
+    }
+  }
+  return Object.entries(agg).sort((x,y)=>x[0].localeCompare(y[0])).map(([c,n])=>`${c}×${n}`);
+}
+function setCaissesForAsin(asin, caisses){
+  asin = normAsin(asin);
+  const m = getCaisseMap();
+  const clean = Array.from(new Set(
+    (caisses||[])
+      .map(x=>String(x||'').trim().toUpperCase())
+      .filter(Boolean)
+  ));
+  if(clean.length) m[asin] = clean; else delete m[asin];
+  localStorage.setItem(LS.caisseMap, JSON.stringify(m));
+}
+
+// ===== Caisses avec quantités (compteurs) — source: STOCK_ACTIONS (local) =====
+function getCaisseCountMap(){
+  try{ return JSON.parse(localStorage.getItem(LS.caisseCountMap) || '{}') || {}; }
+  catch(e){ return {}; }
+}
+function getCaisseCountsForAsin(asin){
+  asin = normAsin(asin);
+  const m = getCaisseCountMap();
+  const v = m[asin];
+  return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+}
+function setCaisseCountsForAsin(asin, countsObj){
+  asin = normAsin(asin);
+  const m = getCaisseCountMap();
+  const clean = {};
+  for(const [k,v] of Object.entries(countsObj||{})){
+    const c = String(k||'').trim().toUpperCase();
+    const n = Number(v||0);
+    if(c && n>0) clean[c]=n;
+  }
+  if(Object.keys(clean).length) m[asin]=clean; else delete m[asin];
+  localStorage.setItem(LS.caisseCountMap, JSON.stringify(m));
+}
+function applyCaisseCountAction(asin, caisse, action){
+  asin = normAsin(asin);
+  caisse = (caisse||'').toString().trim().toUpperCase();
+  action = (action||'').toString().trim().toUpperCase();
+  if(!asin || !/^[A-Z0-9]{10}$/.test(asin) || !caisse) return;
+
+  const cur = getCaisseCountsForAsin(asin);
+  const now = Number(cur[caisse] || 0);
+
+  if(action === 'REMOVE' || action === 'SOLD'){
+    const n = Math.max(0, now - 1);
+    if(n===0) delete cur[caisse]; else cur[caisse]=n;
+  }else{
+    // ADD / MOVE / autres
+    cur[caisse] = now + 1;
+  }
+  setCaisseCountsForAsin(asin, cur);
+}
+function fmtCaisseCountsForAsin(asin){
+  // ✅ Multi-caisses + quantités: aggregate from stateMap (per FNSKU) by ASIN
+  asin = (asin||'').toUpperCase().trim();
+  const sm = loadStateMap();
+  const agg = {};
+  for(const [fn, obj] of Object.entries(sm)){
+    if(!obj) continue;
+    const a = (obj.asin||'').toUpperCase().trim();
+    if(asin && a!==asin) continue;
+    const ca = obj.caisses||{};
+    for(const [c,q] of Object.entries(ca)){
+      const n = Number(q)||0;
+      if(n<=0) continue;
+      agg[c] = (agg[c]||0) + n;
+    }
+  }
+  const parts = Object.entries(agg)
+    .sort((x,y)=>x[0].localeCompare(y[0]))
+    .map(([c,n])=>`${c}×${n}`);
+  if(!parts.length) return '';
+  return ' · 🧺 ' + parts.join(' · ');
+}
+
+
+// ===== Langue (FR/中文) + Titres chinois (optionnel) =====
+function getLang(){
+  return localStorage.getItem(LS.lang) || 'fr';
+}
+function setLang(v){
+  localStorage.setItem(LS.lang, v || 'fr');
+}
+function titleFor(p){
+  const lang = getLang();
+  if(lang==='zh' && p && p.title_zh) return String(p.title_zh);
+  return String((p && p.title) || '');
+}
+
+// ===== FNSKU(s) par ASIN (rebuild depuis le mapping) =====
+function getFnskuMap(){
+  try{ return JSON.parse(localStorage.getItem(LS.fnskuMap) || '{}') || {}; }
+  catch(e){ return {}; }
+}
+function setFnskuMap(map){
+  localStorage.setItem(LS.fnskuMap, JSON.stringify(map || {}));
+}
+function getFnskusForAsin(asin){
+  asin = normAsin(asin);
+  if(!asin) return [];
+  const map = getFnskuMap();
+  const arr = map[asin] || [];
+  return Array.isArray(arr) ? arr : [];
+}
+function rebuildFnskuMapFromMapping(list){
+  const map = {};
+  if(Array.isArray(list)){
+    for(const it of list){
+      if(!it) continue;
+      const asin = normAsin(it.asin);
+      const fnsku = normFnsku(it.fnsku);
+      if(!asin || !fnsku) continue;
+      (map[asin] ||= []);
+      if(!map[asin].includes(fnsku)) map[asin].push(fnsku);
+    }
+  }
+  setFnskuMap(map);
+}
+function addFnskuLinkLocal(fnsku, asin){
+  fnsku = normFnsku(fnsku);
+  asin = normAsin(asin);
+  if(!fnsku || !asin) return;
+  const map = getFnskuMap();
+  const arr = Array.isArray(map[asin]) ? map[asin] : [];
+  if(!arr.includes(fnsku)) arr.push(fnsku);
+  map[asin] = arr;
+  setFnskuMap(map);
+}
+function fmtFnskuBadgeForAsin(asin){
+  const list = getFnskusForAsin(asin);
+  if(!list.length) return '';
+  const first = list[0];
+  const more = list.length>1 ? ` (+${list.length-1})` : '';
+  return ` · 🏷️ <b>${escapeHtml(first)}</b>${more}`;
+}
+
+// Si l'utilisateur installe une nouvelle version (avec quantites) alors qu'il a deja
+// un historique d'actions en local (ou un cursor de sync), la map des caisses/quantites
+// peut etre vide. On peut la reconstruire a partir des actions locales.
+async function rebuildCaisseMapsFromLocalActions_(){
+  const acts = await idbGetAll('actions');
+  if(!acts || !acts.length) return {rebuilt:false, total:0};
+  // reset maps
+  localStorage.setItem(LS.caisseMap, JSON.stringify({}));
+  localStorage.setItem(LS.caisseCountMap, JSON.stringify({}));
+  // applique dans l'ordre chrono (optionnel)
+  acts
+    .slice()
+    .sort((a,b)=> String(a.ts||'').localeCompare(String(b.ts||'')))
+    .forEach(a=>{
+      // apply helpers attend (asin, caisse, action)
+      applyCaisseAction(a.asin, a.caisse, a.action);
+      applyCaisseCountAction(a.asin, a.caisse, a.action);
+    });
+  return {rebuilt:true, total:acts.length};
+}
+
+async function ensureCaisseMapsReady_(){
+  try{
+    const raw = localStorage.getItem(LS.caisseCountMap);
+    const cur = (localStorage.getItem(LS.actionsCursor)||'').trim();
+    let obj = {};
+    try{ obj = raw ? JSON.parse(raw) : {}; }catch(_){ obj = {}; }
+    const empty = !raw || !obj || Object.keys(obj).length===0;
+    // si cursor existe ou actions locales existent, on reconstruit une fois
+    if(empty){
+      const r = await rebuildCaisseMapsFromLocalActions_();
+      if(r && r.rebuilt){
+        // petit indicateur non bloquant
+        try{ $('syncMsg').textContent = `🧺 Caisses reconstruites (${r.total} actions locales).`; }catch(_){ }
+      }else if(cur){
+        // si on a un cursor mais aucune action locale, on force un rebuild au prochain pull
+        // (cursor=1 => pull depuis le debut)
+        localStorage.setItem(LS.actionsCursor, '1');
+      }
+    }
+  }catch(_){ /* no-op */ }
+}
+
+function applyCaisseAction(asin, caisse, action){
+  asin = normAsin(asin);
+  caisse = (caisse||'').toString().trim().toUpperCase();
+  action = (action||'').toString().trim().toUpperCase();
+  if(!asin || !/^[A-Z0-9]{10}$/.test(asin) || !caisse) return;
+
+  const cur = getCaissesForAsin(asin);
+  if(action === 'REMOVE' || action === 'SOLD'){
+    setCaissesForAsin(asin, cur.filter(c=>c!==caisse));
+  }else{
+    // ADD / MOVE / autres → on ajoute la caisse (multi-caisses)
+    cur.push(caisse);
+    setCaissesForAsin(asin, cur);
+  }
+}
+function normAsin(v){
+  v=(v||'').toString().trim().toUpperCase();
+  const m=v.match(/\/dp\/([A-Z0-9]{10})/i);
+  if(m) return m[1].toUpperCase();
+  const m2=v.match(/ASIN[:\s]*([A-Z0-9]{10})/i);
+  if(m2) return m2[1].toUpperCase();
+  return v;
+}
+
+function fmtDate(ts){
+  if(!ts) return '';
+  return ts.toString().slice(0,16).replace('T',' ');
+}
+
+/* Dates + tri (Option A: 1 date par compte = 1ère commande) */
+function jjmm(dateStr){
+  if(!dateStr) return '';
+  // Supporte "YYYY-MM-DD HH:MM:SS" et ISO
+  const s = String(dateStr).trim().replace(' ', 'T');
+  const d = new Date(s);
+  if(isNaN(d)) return '';
+  const dd = String(d.getDate()).padStart(2,'0');
+  const mm = String(d.getMonth()+1).padStart(2,'0');
+  return `${dd}/${mm}`;
+}
+
+function aliasFromEmail(email){
+  const e = (email||'').toString().trim().toLowerCase();
+  if(!e) return '';
+  const local = (e.split('@')[0] || e);
+  const first = local.replace(/[^a-z0-9]+/gi,' ').trim().split(' ')[0] || local;
+  return first.charAt(0).toUpperCase() + first.slice(1);
+}
+
+function accountsWithFirstOrderDate(history){
+  const minTsByEmail = new Map();
+  (history||[]).forEach(h=>{
+    const email = (h.email||'').toString().trim().toLowerCase();
+    if(!email) return;
+    const ts = Date.parse(String(h.order_date||'').trim().replace(' ', 'T'));
+    if(isNaN(ts)) return;
+    const prev = minTsByEmail.get(email);
+    if(prev === undefined || ts < prev) minTsByEmail.set(email, ts);
+  });
+
+  return Array.from(minTsByEmail.entries())
+    .sort((a,b)=>a[1]-b[1]) // plus ancienne d'abord
+    .map(([email, ts])=>{
+      const name = aliasFromEmail(email);
+      const d = jjmm(new Date(ts).toISOString());
+      return d ? `${name} (${d})` : name;
+    });
+}
+
+// Tri par date de commande la plus récente (dernier event de history)
+function getLastOrderTimestamp(product){
+  const hist = Array.isArray(product?.history) ? product.history : [];
+  let maxTs = 0;
+  for(const h of hist){
+    const ts = Date.parse(String(h.order_date||'').trim().replace(' ', 'T'));
+    if(!isNaN(ts) && ts > maxTs) maxTs = ts;
+  }
+  return maxTs;
+}
+
+// Dernière date (timestamp) pour un email spécifique (pour tri quand filtre compte actif)
+function getLastOrderTimestampForEmail(product, emailLower){
+  const hist = Array.isArray(product?.history) ? product.history : [];
+  let maxTs = 0;
+  for(const h of hist){
+    const em = (h.email||'').toString().trim().toLowerCase();
+    if(!em || em !== emailLower) continue;
+    const ts = Date.parse(String(h.order_date||'').trim().replace(' ', 'T'));
+    if(!isNaN(ts) && ts > maxTs) maxTs = ts;
+  }
+  return maxTs;
+}
+
+// Construit la liste des emails de comptes présents dans la base (unique)
+function collectAccountEmails(products){
+  const set = new Set();
+  for(const p of (products||[])){
+    const hist = Array.isArray(p?.history) ? p.history : [];
+    for(const h of hist){
+      const em = (h.email||'').toString().trim().toLowerCase();
+      if(em) set.add(em);
+    }
+  }
+  return Array.from(set).sort();
+}
+
+
+
+function prodHTML(p, opts){
+  opts = opts || {};
+  const img = p.photo_url
+    ? `<img src="${p.photo_url}" alt="">`
+    : `<div class="ph">📦</div>`;
+
+  const price = p.price ? ` · <b>${p.price}</b>` : '';
+
+  // Comptes + date JJ/MM
+  const acc = accountsWithFirstOrderDate(p.history || []);
+  const cnt = acc.length
+    ? ` · 👤 ${acc.length} comptes: ${acc.join(' · ')}`
+    : '';
+
+  const ccBadge = fmtCaisseCountsForAsin(p.asin);
+  const fnskuBadge = fmtFnskuBadgeForAsin(p.asin);
+
+  // opts.fnsku peut être un string... ou un <input> (bug observé: "[object HTMLInputElement]")
+  let rawFnsku = '';
+  if (opts && opts.fnsku != null) {
+    if (typeof opts.fnsku === 'string') rawFnsku = opts.fnsku;
+    else if (typeof opts.fnsku === 'object' && 'value' in opts.fnsku) rawFnsku = String(opts.fnsku.value || '');
+    else rawFnsku = String(opts.fnsku);
+  }
+  rawFnsku = normFnsku(rawFnsku);
+  const scannedFnsku = rawFnsku ? ` · FNSKU: <b>${escapeHtml(rawFnsku)}</b>` : '';
+
+  return `
+    ${img}
+    <div>
+      <h4>${escapeHtml(titleFor(p))}</h4>
+      <div class="meta">
+        ASIN: <b>${p.asin}</b>${price}${cnt}${ccBadge}${fnskuBadge}${scannedFnsku}
+      </div>
+      <div class="meta">
+        ${p.product_url ? `<a href="${p.product_url}" target="_blank">Lien produit</a>` : ''}
+      </div>
+    </div>
+  `;
+}
+
+
+function escapeHtml(s){
+  return (s||'').toString().replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;' }[m]));
+}
+
+async function refreshPills(){
+  netPill.textContent = 'Réseau: ' + (online() ? 'ONLINE' : 'OFFLINE');
+  netPill.className = 'pill ' + (online() ? 'ok' : 'warn');
+
+  const prodCount = (await idbGetAll('products')).length;
+  cachePill.textContent = 'Base: ' + prodCount + ' ASIN';
+  cachePill.className = 'pill ' + (prodCount>0 ? 'ok' : 'warn');
+
+  const mapCount = (await idbGetAll('mapping')).length;
+  mapPill.textContent = 'Mapping: ' + mapCount;
+  mapPill.className = 'pill ' + (mapCount>0 ? 'ok' : 'warn');
+}
+
+async function renderActions(){
+  const actions = (await idbGetAll('actions'))
+    .sort((a,b)=> (b.ts||'').localeCompare(a.ts||''))
+    .slice(0,60);
+  $('actionsTable').innerHTML = actions.map(a=>`
+    <tr>
+      <td>${fmtDate(a.ts)}</td>
+      <td>${escapeHtml(a.fnsku||'')}</td>
+      <td>${escapeHtml(a.asin||'')}</td>
+      <td>${escapeHtml(a.caisse||'')}</td>
+      <td>${escapeHtml(a.action||'')}</td>
+      <td>${a.synced ? '✔' : '…'}</td>
+    </tr>
+  `).join('');
+}
+
+function showOnly(boxId){
+  const ids=['knownBox','searchBox','confirmBox','afterLinkBox','settingsBox'];
+  ids.forEach(id=>$(id).classList.add('hidden'));
+  if(boxId) $(boxId).classList.remove('hidden');
+}
+
+function proposeCaisse(){
+  const c = (localStorage.getItem(LS.lastCaisse) || '').toUpperCase();
+  $('caisseKnown').value = c;
+  $('caisseAfter').value = c;
+}
+
+/* API */
+function fetchWithTimeout(url, options = {}, ms = 15000){
+  const ctrl = new AbortController();
+  const id = setTimeout(()=>ctrl.abort(), ms);
+  return fetch(url, {...options, signal: ctrl.signal}).finally(()=>clearTimeout(id));
+}
+
+async function apiGet(params = {}) {
+  if (!apiUrl || !secret) throw new Error("Réglages manquants (API URL / SECRET).");
+
+  const u = new URL(apiUrl);
+  u.searchParams.set("secret", secret);
+
+  for (const [k, v] of Object.entries(params || {})) {
+    u.searchParams.set(k, String(v ?? ""));
+  }
+
+  // anti-cache
+  u.searchParams.set("_", String(Date.now()));
+
+  const r = await fetchWithTimeout(u.toString(), { method: "GET" }, 15000);
+  if (!r.ok) throw new Error("HTTP_" + r.status);
+  return await r.json();
+}
+
+async function apiPost(body = {}) {
+  if (!apiUrl || !secret) throw new Error("Réglages manquants (API URL / SECRET).");
+
+  // IMPORTANT : Apps Script aime bien text/plain (évite CORS/OPTIONS selon les cas)
+  const payload = JSON.stringify({ secret, ...(body || {}) });
+
+  const r = await fetchWithTimeout(
+    apiUrl,
+    {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: payload,
+    },
+    15000
+  );
+
+  if (!r.ok) throw new Error("HTTP_" + r.status);
+  return await r.json();
+}
+
+
+/* Pull master + mapping */
+async function pullAll(){
+  if(!online()) return;
+  if(!apiUrl || !secret) return;
+
+  $('syncMsg').textContent = '⏳ Mise à jour base + mapping...';
+  try{
+    const [m1, m2] = await Promise.all([
+      apiGet({op:'pull_master_full'}),
+      apiGet({op:'pull_mapping'})
+    ]);
+
+    if(m1.ok && Array.isArray(m1.products)){
+      for(const p of m1.products){
+        // Normalise
+        p.asin = normAsin(p.asin);
+        p.history = Array.isArray(p.history) ? p.history : [];
+        await idbPut('products', p);
+      }
+      localStorage.setItem(LS.lastPull, new Date().toISOString());
+    }
+
+    if(m2.ok && Array.isArray(m2.mapping)){
+      // Rebuild FNSKU map (ASIN -> [FNSKU])
+      rebuildFnskuMapFromMapping(m2.mapping);
+
+      for(const it of m2.mapping){
+        it.fnsku = normFnsku(it.fnsku);
+        it.asin = normAsin(it.asin);
+        await idbPut('mapping', it);
+      }
+    }
+
+    // IMPORTANT : les "caisses" sont ...
+    // donc on doit aussi tirer les actions du Google Sheet pour que les
+    // caisses soient identiques sur tous les telephones.
+    // (necessite l'op Apps Script: pull_actions)
+    await pullStockActions({silent:true});
+
+    // Apres pull des actions, on regenere la vue.
+    await refreshPills();
+    await renderActions();
+
+    $('syncMsg').textContent = '✅ Base + mapping à jour';
+  }catch(e){
+    $('syncMsg').textContent = '❌ Pull impossible ('+ (e.message||e) +')';
+  }
+  await refreshPills();
+}
+
+/* Push actions */
+async function pushActions(){
+  if(!online()) return;
+  if(!apiUrl || !secret) return;
+
+  const all = await idbGetAll('actions');
+  const pending = all.filter(a=>!a.synced);
+
+  if(!pending.length) return;
+
+  $('syncMsg').textContent = '⏳ Sync actions ('+pending.length+')...';
+
+  try{
+    const resp = await apiPost({op:'push_actions', actions: pending});
+    if(resp.ok){
+      // mark synced (we re-put by id)
+      const appended = resp.appended || 0;
+      const skipped = resp.skipped || 0;
+
+      // safest: mark everything we attempted as synced (ids are unique, server dedup)
+      for(const a of pending){
+        a.synced = true;
+        await idbPut('actions', a);
+      }
+
+      $('syncMsg').textContent = `✅ Sync OK (app:${appended}, skip:${skipped})`;
+      await renderActions();
+    }else{
+      $('syncMsg').textContent = '❌ Sync refusée: '+(resp.error||'');
+    }
+  }catch(e){
+    $('syncMsg').textContent = '❌ Sync impossible (réseau)';
+  }
+}
+
+
+/* Pull STOCK_ACTIONS (cursor) + reconstruire les caisses (global multi-téléphones) */
+async function pullStockActions(){
+  // ✅ Full replay sync: every device rebuilds caisse state from the same server log.
+  if(!online()) return {pulled:0};
+  if(!apiUrl || !secret) return {pulled:0};
+
+  const pulled = await pullAllActionsFromServer();
+  await rebuildCaisseStateFromActions();
+
+  // cursor not used anymore (avoids desync)
+  localStorage.removeItem(LS.actionsCursor);
+
+  return {pulled};
+}
+
+
+async function pullState(){
+  if(!online()) return {pulled:0};
+  if(!apiUrl || !secret) return {pulled:0};
+
+  const r = await apiGet('op=pull_state');
+  if(!r.ok) throw new Error(r.error||'pull_state failed');
+  const arr = r.state || [];
+
+  const sm = {};
+  for(const it of arr){
+    const fnsku = (it.fnsku||'').toUpperCase().trim();
+    const caisse = (it.caisse||'').toUpperCase().trim();
+    if(!fnsku || !caisse) continue;
+    if(!sm[fnsku]) sm[fnsku] = { asin: (it.asin||'').toUpperCase().trim(), caisses:{} };
+    if(it.asin) sm[fnsku].asin = (it.asin||'').toUpperCase().trim();
+    sm[fnsku].caisses[caisse] = Number(it.qty||0)||0;
+  }
+  saveStateMap(sm);
+  return {pulled: arr.length};
+}
+
+
+
+
 
 /* Auto sync: when online => push then pull */
 let syncLock=false;
@@ -444,11 +1120,25 @@ async function doSearch(){
     return;
   }
 
-  const filtered = all
-    .filter(p => {
-      const hay = (p.brand+' '+p.title+' '+p.asin).toUpperCase();
-      return (!accEmail || (p.account_email||'').toLowerCase()===accEmail)
-        && (hay.includes(q) || foldText(hay).includes(qFold));
+  let filtered = all
+    .filter(p=>{
+      const tFold = foldText(p.title||'');
+      const tFoldZh = foldText(p.title_zh||'');
+      const asin=(p.asin||'').toString().toUpperCase();
+      // Recherche sur titre / ASIN
+      return !qFold || tFold.includes(qFold) || tFoldZh.includes(qFold) || asin.includes(q);
+    })
+    .filter(p=>{
+      if(!accEmail) return true;
+      const hist = Array.isArray(p?.history) ? p.history : [];
+      return hist.some(h => (h.email||'').toString().trim().toLowerCase() === accEmail);
+    })
+    .sort((a,b)=>{
+      // Tri par date de commande la plus récente
+      const tb = accEmail ? getLastOrderTimestampForEmail(b, accEmail) : getLastOrderTimestamp(b);
+      const ta = accEmail ? getLastOrderTimestampForEmail(a, accEmail) : getLastOrderTimestamp(a);
+      if(tb !== ta) return tb - ta; // plus récent en premier
+      return (b.orders_count||0) - (a.orders_count||0); // fallback
     })
     .slice(0,60);
 
@@ -591,70 +1281,8 @@ async function saveAction({fnsku, asin, caisse, action}){
   autoSync();
 }
 
-/* Camera scan (BarcodeDetector) */
-let stream = null, track = null, scanning = false, scanningInterval = null, flashOn = false;
-
-async function startScan() {
-  if (scanning) return;
-  if (!('BarcodeDetector' in window)) {
-    alert('Scan non supporté sur ce navigateur');
-    return;
-  }
-  scanning = true;
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
-  } catch(e) {
-    alert('Erreur accès caméra: ' + e.message);
-    scanning = false;
-    return;
-  }
-  track = stream.getVideoTracks()[0];
-  // Show overlay
-  $('scanModal').classList.remove('hidden');
-  // Show camera stream
-  $('video').srcObject = stream;
-  // Handle flash availability
-  if (track.getCapabilities().torch) {
-    $('btnFlash').classList.remove('hidden');
-  } else {
-    $('btnFlash').classList.add('hidden');
-  }
-  // Create barcode detector
-  const detector = new BarcodeDetector({ formats: ['code_128', 'code_39'] });
-  // Start scanning periodically
-  scanningInterval = setInterval(async () => {
-    try {
-      const barcodes = await detector.detect($('video'));
-      if (barcodes.length > 0) {
-        const code = (barcodes[0].rawValue || '').trim();
-        if (code) {
-          // Stop scanning
-          clearInterval(scanningInterval);
-          stream.getTracks().forEach(t => t.stop());
-          // Feedback (beep and vibration)
-          if (navigator.vibrate) navigator.vibrate(200);
-          try {
-            (new Audio("data:audio/wav;base64,//uQRAAAAWMSLwUIYAAsYkXgoQwAEaYLWfkWgAI0wWs/ItAAAGDgYtAgAyN+QWaAAihwMWm4G8QQRDiMcCBcH3Cc+CDv/7xA4Tvh9Rz/y8QADBwMWgQAZG/ILNAARQ4GLTcDeIIIhxGOBAuD7hOfBB3/94gcJ3w+o5/5eIAIAAAVwWgQAVQ2ORaIQwEMAJiDg95G4nQL7mQVWI6GwRcfsZAcsKkJvxgxEjzFUgfHoSQ9Qq7KNwqHwuB13MA4a1q/DmBrHgPcmjiGoh//EwC5nGPEmS4RcfkVKOhJf+WOgoxJclFz3kgn//dBA+ya1GhurNn8zb//9NNutNuhz31f////9vt///z+IdAEAAAK4LQIAKobHItEIYCGAExBwe8jcToF9zIKrEdDYIuP2MgOWFSE34wYiR5iqQPj0JIeoVdlG4VD4XA67mAcNa1fhzA1jwHuTRxDUQ//iYBczjHiTJcIuPyKlHQkv/LHQUYkuSi57yQT//uggfZNajQ3Vmz+Zt//+mm3Wm3Q576v////+32///5/EOgAAADVghQAAAAA//uQZAUAB1WI0PZugAAAAAoQwAAAEk3nRd2qAAAAACiDgAAAAAAABCqEEQRLCgwpBGMlJkIz8jKhGvj4k6jzRnqasNKIeoh5gI7BJaC1A1AoNBjJgbyApVS4IDlZgDU5WUAxEKDNmmALHzZp0Fkz1FMTmGFl1FMEyodIavcCAUHDWrKAIA4aa2oCgILEBupZgHvAhEBcZ6joQBxS76AgccrFlczBvKLC0QI2cBoCFvfTDAo7eoOQInqDPBtvrDEZBNYN5xwNwxQRfw8ZQ5wQVLvO8OYU+mHvFLlDh05Mdg7BT6YrRPpCBznMB2r//xKJjyyOh+cImr2/4doscwD6neZjuZR4AgAABYAAAABy1xcdQtxYBYYZdifkUDgzzXaXn98Z0oi9ILU5mBjFANmRwlVJ3/6jYDAmxaiDG3/6xjQQCCKkRb/6kg/wW+kSJ5//rLobkLSiKmqP/0ikJuDaSaSf/6JiLYLEYnW/+kXg1WRVJL/9EmQ1YZIsv/6Qzwy5qk7/+tEU0nkls3/zIUMPKNX/6yZLf+kFgAfgGyLFAUwY//uQZAUABcd5UiNPVXAAAApAAAAAE0VZQKw9ISAAACgAAAAAVQIygIElVrFkBS+Jhi+EAuu+lKAkYUEIsmEAEoMeDmCETMvfSHTGkF5RWH7kz/ESHWPAq/kcCRhqBtMdokPdM7vil7RG98A2sc7zO6ZvTdM7pmOUAZTnJW+NXxqmd41dqJ6mLTXxrPpnV8avaIf5SvL7pndPvPpndJR9Kuu8fePvuiuhorgWjp7Mf/PRjxcFCPDkW31srioCExivv9lcwKEaHsf/7ow2Fl1T/9RkXgEhYElAoCLFtMArxwivDJJ+bR1HTKJdlEoTELCIqgEwVGSQ+hIm0NbK8WXcTEI0UPoa2NbG4y2K00JEWbZavJXkYaqo9CRH")).play();
-          } catch(e) {}
-          // Insert code and close overlay
-          $('fnsku').value = code.toUpperCase();
-          $('scanModal').classList.add('hidden');
-          scanning = false;
-          // Trigger lookup if available
-          if (typeof lookupFnsku === 'function') {
-            lookupFnsku();
-          }
-        }
-      }
-    } catch(e) {
-      console.error(e);
-    }
-  }, 300);
-}
-
 /* UI bindings */
 $('btnLookup').onclick = lookupFnsku;
-$('btnScan').onclick = startScan;
 $('btnClear').onclick = ()=>{
   $('fnsku').value='';
   $('q').value='';
@@ -669,21 +1297,7 @@ $('btnClear').onclick = ()=>{
   setStatus('Prêt.', '');
   $('fnsku').focus();
 };
-$('btnCloseScan').onclick = ()=>{
-  if (scanningInterval) clearInterval(scanningInterval);
-  if (stream) stream.getTracks().forEach(t => t.stop());
-  $('scanModal').classList.add('hidden');
-  scanning = false;
-  flashOn = false;
-};
-$('btnFlash').onclick = ()=>{
-  if (track && track.getCapabilities().torch) {
-    flashOn = !flashOn;
-    try {
-      track.applyConstraints({ advanced: [{ torch: flashOn }] });
-    } catch(e) {}
-  }
-};
+
 $('btnSearch').onclick = doSearch;
 $('accountFilter').addEventListener('change', ()=>doSearch());
 $('q').addEventListener('keydown', (e)=>{ if(e.key==='Enter') doSearch(); });
@@ -709,8 +1323,7 @@ $('btnSettings').onclick = ()=>{
     // init langue
     const lm = $('langMode');
     if(lm){ lm.value = getLang(); }
-  $('settingsBox').classList.toggle('hidden');
-};
+ $('settingsBox').classList.toggle('hidden'); };
 // Langue (FR/中文)
 $('langMode') && ($('langMode').onchange = ()=>{
   setLang($('langMode').value);
@@ -803,7 +1416,1376 @@ setInterval(()=>{ if(online()) autoSync(); }, 45000);
   }
 })();
 </script>
+  <script>
+(function () {
+
+  function findFnskuInput() {
+    // 1️⃣ priorité au placeholder FNSKU
+    let el = [...document.querySelectorAll('input')]
+      .find(i =>
+        i.placeholder &&
+        i.placeholder.toLowerCase().includes('fnsku')
+      );
+
+    if (el) return el;
+
+    // 2️⃣ fallback : premier input texte visible
+    el = [...document.querySelectorAll('input[type="text"]')]
+      .find(i => i.offsetParent !== null);
+
+    return el || null;
+  }
+
+  function focusAndSelect() {
+    const input = findFnskuInput();
+    if (!input) return;
+
+    // petit délai pour Android / PWA
+    setTimeout(() => {
+      input.focus();
+      input.select();
+    }, 80);
+  }
+
+  // 🔁 quand on revient depuis une autre app (Binary Eye)
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      focusAndSelect();
+    }
+  });
+
+  // 🔁 au retour arrière Android
+  window.addEventListener('pageshow', focusAndSelect);
+
+  // 🔁 premier chargement
+  window.addEventListener('load', focusAndSelect);
+
+})();
+</script>
 <script>
+/* PWA cache */
+if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js'); }
+
+const $ = (id)=>document.getElementById(id);
+const netPill=$('netPill'), cachePill=$('cachePill'), mapPill=$('mapPill');
+
+const LS = {
+  apiUrl: 'vine_api_url',
+  secret: 'vine_secret',
+  device: 'vine_device',
+  lastCaisse: 'vine_last_caisse',
+  lastPull: 'vine_last_pull',
+  caisseMap: 'vine_caisse_by_asin',
+  caisseCountMap: 'vine_caisse_counts_by_asin',
+  actionsCursor: 'vine_actions_cursor',
+  stateMap: 'vine_state_by_fnsku'
+,
+  fnskuMap: 'vine_fnskuMap',
+  lang: 'vine_lang'
+};
+
+const deviceId = localStorage.getItem(LS.device) || (()=> {
+  const v='phone_'+Math.random().toString(16).slice(2,8);
+  localStorage.setItem(LS.device, v);
+  return v;
+})();
+
+let apiUrl = localStorage.getItem(LS.apiUrl) || '';
+let secret = localStorage.getItem(LS.secret) || '';
+let lastCaisse = (localStorage.getItem(LS.lastCaisse) || '').toUpperCase();
+
+$('apiUrl').value = apiUrl;
+$('secret').value = secret;
+
+const DB_NAME='vine_global', DB_VER=1;
+let db;
+
+/* IndexedDB stores:
+  - products (key asin) => {asin,title,photo_url,product_url,price,orders_count,history}
+  - mapping (key fnsku) => {fnsku,asin,linked_at,device}
+  - actions (auto id) => {id,ts,device,fnsku,asin,caisse,action,synced:false}
+*/
+function openDB(){
+  return new Promise((res,rej)=>{
+    const r=indexedDB.open(DB_NAME, DB_VER);
+    r.onupgradeneeded=()=>{
+      const d=r.result;
+      if(!d.objectStoreNames.contains('products')) d.createObjectStore('products', {keyPath:'asin'});
+      if(!d.objectStoreNames.contains('mapping')) d.createObjectStore('mapping', {keyPath:'fnsku'});
+      if(!d.objectStoreNames.contains('actions')) d.createObjectStore('actions', {keyPath:'id'});
+    };
+    r.onsuccess=()=>res(r.result);
+    r.onerror=()=>rej(r.error);
+  });
+}
+
+function idbPut(store, val){
+  return new Promise((res,rej)=>{
+    const tx=db.transaction(store,'readwrite');
+    tx.objectStore(store).put(val);
+    tx.oncomplete=()=>res();
+    tx.onerror=()=>rej(tx.error);
+  });
+}
+function idbGet(store, key){
+  return new Promise((res,rej)=>{
+    const tx=db.transaction(store,'readonly');
+    const req=tx.objectStore(store).get(key);
+    req.onsuccess=()=>res(req.result||null);
+    req.onerror=()=>rej(req.error);
+  });
+}
+function idbGetAll(store){
+  return new Promise((res,rej)=>{
+    const tx=db.transaction(store,'readonly');
+    const req=tx.objectStore(store).getAll();
+    req.onsuccess=()=>res(req.result||[]);
+    req.onerror=()=>rej(req.error);
+  });
+}
+function idbDelAll(store){
+  return new Promise((res,rej)=>{
+    const tx=db.transaction(store,'readwrite');
+    const req=tx.objectStore(store).clear();
+    req.onsuccess=()=>res();
+    req.onerror=()=>rej(req.error);
+  });
+}
+
+async function pullAllActionsFromServer(){
+  if(!online()) return 0;
+  if(!apiUrl || !secret) return 0;
+  let cursor = 0;
+  let total = 0;
+  while(true){
+    const r = await apiGet(`op=pull_actions&cursor=${cursor}&limit=2000`);
+    if(!r.ok) throw new Error(r.error||'pull_actions failed');
+    const actions = r.actions||[];
+    for(const a of actions){
+      // Store in IDB; mark as synced
+      await idbPut('actions', { ...a, synced:true });
+    }
+    total += actions.length;
+    if(r.next_cursor===null || r.next_cursor===undefined) break;
+    cursor = r.next_cursor;
+    if(actions.length===0) break;
+  }
+  return total;
+}
+
+
+// --- Anti-duplicate save (multi-device safe) ---
+let lastSaveKey = '';
+let lastSaveAt = 0;
+
+// Fast hash (FNV-1a 32-bit) to generate stable IDs without crypto APIs
+function fnv1a32(str){
+  let h = 0x811c9dc5;
+  for(let i=0;i<str.length;i++){
+    h ^= str.charCodeAt(i);
+    h = (h + ((h<<1) + (h<<4) + (h<<7) + (h<<8) + (h<<24))) >>> 0;
+  }
+  return h >>> 0;
+}
+
+function makeStableActionId(fnsku, asin, caisse, action){
+  const now = Date.now();
+  const bucket = Math.floor(now / 3000); // 3s bucket (prevents double clicks / retries)
+  const key = [deviceId, fnsku, asin, caisse, action, bucket].join('|');
+  return deviceId + '_' + fnv1a32(key).toString(16);
+}
+
+async function rebuildCaisseStateFromActions(){
+  const acts = await idbGetAll('actions');
+  acts.sort((a,b)=>{
+    const ta = Date.parse(a.ts||'') || 0;
+    const tb = Date.parse(b.ts||'') || 0;
+    if(ta!==tb) return ta-tb;
+    return String(a.id||'').localeCompare(String(b.id||''));
+  });
+  const caisseByAsin = {};
+  const caisseCounts = {};
+  for(const a of acts){
+    const asin = (a.asin||'').toUpperCase().trim();
+    if(!asin) continue;
+    const action = (a.action||'').toUpperCase().trim();
+    const caisse = (a.caisse||'').toUpperCase().trim();
+
+    if(action==='SOLD' || action==='REMOVE'){
+      caisseByAsin[asin] = '';
+    } else if(action==='ADD' || action==='MOVE'){
+      caisseByAsin[asin] = caisse;
+    }
+
+    // Optional counts by (asin,caisse) for UI badges
+    const key = asin+'||'+(caisse||'');
+    const delta = (action==='SOLD'||action==='REMOVE') ? -1 : 1;
+    caisseCounts[key] = (caisseCounts[key]||0) + delta;
+  }
+  localStorage.setItem(LS.caisseMap, JSON.stringify(caisseByAsin));
+  localStorage.setItem(LS.caisseCountMap, JSON.stringify(caisseCounts));
+}
+
+
+
+function loadStateMap(){
+  try{ return JSON.parse(localStorage.getItem(LS.stateMap)||'{}')||{}; }catch(e){ return {}; }
+}
+function saveStateMap(m){
+  localStorage.setItem(LS.stateMap, JSON.stringify(m||{}));
+}
+function stateBadgesForFnsku(fnsku){
+  const sm = loadStateMap();
+  const o = sm[(fnsku||'').toUpperCase().trim()];
+  if(!o || !o.caisses) return '—';
+  const parts = [];
+  for(const [c, q] of Object.entries(o.caisses)){
+    const n = Number(q)||0;
+    if(n>0) parts.push(`${c}×${n}`);
+  }
+  return parts.length ? parts.sort().join('  ') : '—';
+}
+function applyQtyLocal(fnsku, asin, caisse, action){
+  fnsku = (fnsku||'').toUpperCase().trim();
+  asin = (asin||'').toUpperCase().trim();
+  caisse = (caisse||'').toUpperCase().trim();
+  if(!fnsku || !caisse) return;
+  const sm = loadStateMap();
+  if(!sm[fnsku]) sm[fnsku] = { asin: asin || '', caisses: {} };
+  if(asin) sm[fnsku].asin = asin;
+  if(!sm[fnsku].caisses) sm[fnsku].caisses = {};
+  const cur = Number(sm[fnsku].caisses[caisse]||0)||0;
+  let delta = 0;
+  const a = (action||'').toUpperCase().trim();
+  if(a==='ADD') delta = 1;
+  else if(a==='REMOVE' || a==='SOLD') delta = -1;
+  const nxt = Math.max(0, cur + delta);
+  sm[fnsku].caisses[caisse] = nxt;
+  saveStateMap(sm);
+}
+
+
+/* Helpers */
+function setStatus(msg, cls=''){
+  $('status').textContent = msg;
+  $('status').className = 'muted ' + cls;
+}
+function online(){ return navigator.onLine; }
+
+function normFnsku(v){
+  return (v||'').toString().trim().toUpperCase();
+}
+
+// Recherche non sensible aux accents (é=e, à=a, ç=c)
+function foldText(s){
+  return (s||'').toString()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g,'')
+    .toUpperCase();
+}
+
+// Caisses par ASIN (plusieurs caisses possibles)
+function getCaisseMap(){
+  try{ return JSON.parse(localStorage.getItem(LS.caisseMap) || '{}') || {}; }
+  catch(e){ return {}; }
+}
+function getCaissesForAsin(asin){
+  // Legacy: previously stored per ASIN. Now we use stateMap (per FNSKU) and aggregate by ASIN.
+  asin = (asin||'').toUpperCase().trim();
+  const sm = loadStateMap();
+  const agg = {};
+  for(const [fn, obj] of Object.entries(sm)){
+    if(!obj) continue;
+    const a = (obj.asin||'').toUpperCase().trim();
+    if(asin && a!==asin) continue;
+    const ca = obj.caisses||{};
+    for(const [c,q] of Object.entries(ca)){
+      const n = Number(q)||0;
+      if(n<=0) continue;
+      agg[c] = (agg[c]||0) + n;
+    }
+  }
+  return Object.entries(agg).sort((x,y)=>x[0].localeCompare(y[0])).map(([c,n])=>`${c}×${n}`);
+}
+function setCaissesForAsin(asin, caisses){
+  asin = normAsin(asin);
+  const m = getCaisseMap();
+  const clean = Array.from(new Set(
+    (caisses||[])
+      .map(x=>String(x||'').trim().toUpperCase())
+      .filter(Boolean)
+  ));
+  if(clean.length) m[asin] = clean; else delete m[asin];
+  localStorage.setItem(LS.caisseMap, JSON.stringify(m));
+}
+
+// ===== Caisses avec quantités (compteurs) — source: STOCK_ACTIONS (local) =====
+function getCaisseCountMap(){
+  try{ return JSON.parse(localStorage.getItem(LS.caisseCountMap) || '{}') || {}; }
+  catch(e){ return {}; }
+}
+function getCaisseCountsForAsin(asin){
+  asin = normAsin(asin);
+  const m = getCaisseCountMap();
+  const v = m[asin];
+  return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+}
+function setCaisseCountsForAsin(asin, countsObj){
+  asin = normAsin(asin);
+  const m = getCaisseCountMap();
+  const clean = {};
+  for(const [k,v] of Object.entries(countsObj||{})){
+    const c = String(k||'').trim().toUpperCase();
+    const n = Number(v||0);
+    if(c && n>0) clean[c]=n;
+  }
+  if(Object.keys(clean).length) m[asin]=clean; else delete m[asin];
+  localStorage.setItem(LS.caisseCountMap, JSON.stringify(m));
+}
+function applyCaisseCountAction(asin, caisse, action){
+  asin = normAsin(asin);
+  caisse = (caisse||'').toString().trim().toUpperCase();
+  action = (action||'').toString().trim().toUpperCase();
+  if(!asin || !/^[A-Z0-9]{10}$/.test(asin) || !caisse) return;
+
+  const cur = getCaisseCountsForAsin(asin);
+  const now = Number(cur[caisse] || 0);
+
+  if(action === 'REMOVE' || action === 'SOLD'){
+    const n = Math.max(0, now - 1);
+    if(n===0) delete cur[caisse]; else cur[caisse]=n;
+  }else{
+    // ADD / MOVE / autres
+    cur[caisse] = now + 1;
+  }
+  setCaisseCountsForAsin(asin, cur);
+}
+function fmtCaisseCountsForAsin(asin){
+  // ✅ Multi-caisses + quantités: aggregate from stateMap (per FNSKU) by ASIN
+  asin = (asin||'').toUpperCase().trim();
+  const sm = loadStateMap();
+  const agg = {};
+  for(const [fn, obj] of Object.entries(sm)){
+    if(!obj) continue;
+    const a = (obj.asin||'').toUpperCase().trim();
+    if(asin && a!==asin) continue;
+    const ca = obj.caisses||{};
+    for(const [c,q] of Object.entries(ca)){
+      const n = Number(q)||0;
+      if(n<=0) continue;
+      agg[c] = (agg[c]||0) + n;
+    }
+  }
+  const parts = Object.entries(agg)
+    .sort((x,y)=>x[0].localeCompare(y[0]))
+    .map(([c,n])=>`${c}×${n}`);
+  if(!parts.length) return '';
+  return ' · 🧺 ' + parts.join(' · ');
+}
+
+
+// ===== Langue (FR/中文) + Titres chinois (optionnel) =====
+function getLang(){
+  return localStorage.getItem(LS.lang) || 'fr';
+}
+function setLang(v){
+  localStorage.setItem(LS.lang, v || 'fr');
+}
+function titleFor(p){
+  const lang = getLang();
+  if(lang==='zh' && p && p.title_zh) return String(p.title_zh);
+  return String((p && p.title) || '');
+}
+
+// ===== FNSKU(s) par ASIN (rebuild depuis le mapping) =====
+function getFnskuMap(){
+  try{ return JSON.parse(localStorage.getItem(LS.fnskuMap) || '{}') || {}; }
+  catch(e){ return {}; }
+}
+function setFnskuMap(map){
+  localStorage.setItem(LS.fnskuMap, JSON.stringify(map || {}));
+}
+function getFnskusForAsin(asin){
+  asin = normAsin(asin);
+  if(!asin) return [];
+  const map = getFnskuMap();
+  const arr = map[asin] || [];
+  return Array.isArray(arr) ? arr : [];
+}
+function rebuildFnskuMapFromMapping(list){
+  const map = {};
+  if(Array.isArray(list)){
+    for(const it of list){
+      if(!it) continue;
+      const asin = normAsin(it.asin);
+      const fnsku = normFnsku(it.fnsku);
+      if(!asin || !fnsku) continue;
+      (map[asin] ||= []);
+      if(!map[asin].includes(fnsku)) map[asin].push(fnsku);
+    }
+  }
+  setFnskuMap(map);
+}
+function addFnskuLinkLocal(fnsku, asin){
+  fnsku = normFnsku(fnsku);
+  asin = normAsin(asin);
+  if(!fnsku || !asin) return;
+  const map = getFnskuMap();
+  const arr = Array.isArray(map[asin]) ? map[asin] : [];
+  if(!arr.includes(fnsku)) arr.push(fnsku);
+  map[asin] = arr;
+  setFnskuMap(map);
+}
+function fmtFnskuBadgeForAsin(asin){
+  const list = getFnskusForAsin(asin);
+  if(!list.length) return '';
+  const first = list[0];
+  const more = list.length>1 ? ` (+${list.length-1})` : '';
+  return ` · 🏷️ <b>${escapeHtml(first)}</b>${more}`;
+}
+
+// Si l'utilisateur installe une nouvelle version (avec quantites) alors qu'il a deja
+// un historique d'actions en local (ou un cursor de sync), la map des caisses/quantites
+// peut etre vide. On peut la reconstruire a partir des actions locales.
+async function rebuildCaisseMapsFromLocalActions_(){
+  const acts = await idbGetAll('actions');
+  if(!acts || !acts.length) return {rebuilt:false, total:0};
+  // reset maps
+  localStorage.setItem(LS.caisseMap, JSON.stringify({}));
+  localStorage.setItem(LS.caisseCountMap, JSON.stringify({}));
+  // applique dans l'ordre chrono (optionnel)
+  acts
+    .slice()
+    .sort((a,b)=> String(a.ts||'').localeCompare(String(b.ts||'')))
+    .forEach(a=>{
+      // apply helpers attend (asin, caisse, action)
+      applyCaisseAction(a.asin, a.caisse, a.action);
+      applyCaisseCountAction(a.asin, a.caisse, a.action);
+    });
+  return {rebuilt:true, total:acts.length};
+}
+
+async function ensureCaisseMapsReady_(){
+  try{
+    const raw = localStorage.getItem(LS.caisseCountMap);
+    const cur = (localStorage.getItem(LS.actionsCursor)||'').trim();
+    let obj = {};
+    try{ obj = raw ? JSON.parse(raw) : {}; }catch(_){ obj = {}; }
+    const empty = !raw || !obj || Object.keys(obj).length===0;
+    // si cursor existe ou actions locales existent, on reconstruit une fois
+    if(empty){
+      const r = await rebuildCaisseMapsFromLocalActions_();
+      if(r && r.rebuilt){
+        // petit indicateur non bloquant
+        try{ $('syncMsg').textContent = `🧺 Caisses reconstruites (${r.total} actions locales).`; }catch(_){ }
+      }else if(cur){
+        // si on a un cursor mais aucune action locale, on force un rebuild au prochain pull
+        // (cursor=1 => pull depuis le debut)
+        localStorage.setItem(LS.actionsCursor, '1');
+      }
+    }
+  }catch(_){ /* no-op */ }
+}
+
+function applyCaisseAction(asin, caisse, action){
+  asin = normAsin(asin);
+  caisse = (caisse||'').toString().trim().toUpperCase();
+  action = (action||'').toString().trim().toUpperCase();
+  if(!asin || !/^[A-Z0-9]{10}$/.test(asin) || !caisse) return;
+
+  const cur = getCaissesForAsin(asin);
+  if(action === 'REMOVE' || action === 'SOLD'){
+    setCaissesForAsin(asin, cur.filter(c=>c!==caisse));
+  }else{
+    // ADD / MOVE / autres → on ajoute la caisse (multi-caisses)
+    cur.push(caisse);
+    setCaissesForAsin(asin, cur);
+  }
+}
+function normAsin(v){
+  v=(v||'').toString().trim().toUpperCase();
+  const m=v.match(/\/dp\/([A-Z0-9]{10})/i);
+  if(m) return m[1].toUpperCase();
+  const m2=v.match(/ASIN[:\s]*([A-Z0-9]{10})/i);
+  if(m2) return m2[1].toUpperCase();
+  return v;
+}
+
+function fmtDate(ts){
+  if(!ts) return '';
+  return ts.toString().slice(0,16).replace('T',' ');
+}
+
+/* Dates + tri (Option A: 1 date par compte = 1ère commande) */
+function jjmm(dateStr){
+  if(!dateStr) return '';
+  // Supporte "YYYY-MM-DD HH:MM:SS" et ISO
+  const s = String(dateStr).trim().replace(' ', 'T');
+  const d = new Date(s);
+  if(isNaN(d)) return '';
+  const dd = String(d.getDate()).padStart(2,'0');
+  const mm = String(d.getMonth()+1).padStart(2,'0');
+  return `${dd}/${mm}`;
+}
+
+function aliasFromEmail(email){
+  const e = (email||'').toString().trim().toLowerCase();
+  if(!e) return '';
+  const local = (e.split('@')[0] || e);
+  const first = local.replace(/[^a-z0-9]+/gi,' ').trim().split(' ')[0] || local;
+  return first.charAt(0).toUpperCase() + first.slice(1);
+}
+
+function accountsWithFirstOrderDate(history){
+  const minTsByEmail = new Map();
+  (history||[]).forEach(h=>{
+    const email = (h.email||'').toString().trim().toLowerCase();
+    if(!email) return;
+    const ts = Date.parse(String(h.order_date||'').trim().replace(' ', 'T'));
+    if(isNaN(ts)) return;
+    const prev = minTsByEmail.get(email);
+    if(prev === undefined || ts < prev) minTsByEmail.set(email, ts);
+  });
+
+  return Array.from(minTsByEmail.entries())
+    .sort((a,b)=>a[1]-b[1]) // plus ancienne d'abord
+    .map(([email, ts])=>{
+      const name = aliasFromEmail(email);
+      const d = jjmm(new Date(ts).toISOString());
+      return d ? `${name} (${d})` : name;
+    });
+}
+
+// Tri par date de commande la plus récente (dernier event de history)
+function getLastOrderTimestamp(product){
+  const hist = Array.isArray(product?.history) ? product.history : [];
+  let maxTs = 0;
+  for(const h of hist){
+    const ts = Date.parse(String(h.order_date||'').trim().replace(' ', 'T'));
+    if(!isNaN(ts) && ts > maxTs) maxTs = ts;
+  }
+  return maxTs;
+}
+
+// Dernière date (timestamp) pour un email spécifique (pour tri quand filtre compte actif)
+function getLastOrderTimestampForEmail(product, emailLower){
+  const hist = Array.isArray(product?.history) ? product.history : [];
+  let maxTs = 0;
+  for(const h of hist){
+    const em = (h.email||'').toString().trim().toLowerCase();
+    if(!em || em !== emailLower) continue;
+    const ts = Date.parse(String(h.order_date||'').trim().replace(' ', 'T'));
+    if(!isNaN(ts) && ts > maxTs) maxTs = ts;
+  }
+  return maxTs;
+}
+
+// Construit la liste des emails de comptes présents dans la base (unique)
+function collectAccountEmails(products){
+  const set = new Set();
+  for(const p of (products||[])){
+    const hist = Array.isArray(p?.history) ? p.history : [];
+    for(const h of hist){
+      const em = (h.email||'').toString().trim().toLowerCase();
+      if(em) set.add(em);
+    }
+  }
+  return Array.from(set).sort();
+}
+
+
+
+function prodHTML(p, opts){
+  opts = opts || {};
+  const img = p.photo_url
+    ? `<img src="${p.photo_url}" alt="">`
+    : `<div class="ph">📦</div>`;
+
+  const price = p.price ? ` · <b>${p.price}</b>` : '';
+
+  // Comptes + date JJ/MM
+  const acc = accountsWithFirstOrderDate(p.history || []);
+  const cnt = acc.length
+    ? ` · 👤 ${acc.length} comptes: ${acc.join(' · ')}`
+    : '';
+
+  const ccBadge = fmtCaisseCountsForAsin(p.asin);
+  const fnskuBadge = fmtFnskuBadgeForAsin(p.asin);
+
+  // opts.fnsku peut être un string... ou un <input> (bug observé: "[object HTMLInputElement]")
+  let rawFnsku = '';
+  if (opts && opts.fnsku != null) {
+    if (typeof opts.fnsku === 'string') rawFnsku = opts.fnsku;
+    else if (typeof opts.fnsku === 'object' && 'value' in opts.fnsku) rawFnsku = String(opts.fnsku.value || '');
+    else rawFnsku = String(opts.fnsku);
+  }
+  rawFnsku = normFnsku(rawFnsku);
+  const scannedFnsku = rawFnsku ? ` · FNSKU: <b>${escapeHtml(rawFnsku)}</b>` : '';
+
+  return `
+    ${img}
+    <div>
+      <h4>${escapeHtml(titleFor(p))}</h4>
+      <div class="meta">
+        ASIN: <b>${p.asin}</b>${price}${cnt}${ccBadge}${fnskuBadge}${scannedFnsku}
+      </div>
+      <div class="meta">
+        ${p.product_url ? `<a href="${p.product_url}" target="_blank">Lien produit</a>` : ''}
+      </div>
+    </div>
+  `;
+}
+
+
+function escapeHtml(s){
+  return (s||'').toString().replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;' }[m]));
+}
+
+async function refreshPills(){
+  netPill.textContent = 'Réseau: ' + (online() ? 'ONLINE' : 'OFFLINE');
+  netPill.className = 'pill ' + (online() ? 'ok' : 'warn');
+
+  const prodCount = (await idbGetAll('products')).length;
+  cachePill.textContent = 'Base: ' + prodCount + ' ASIN';
+  cachePill.className = 'pill ' + (prodCount>0 ? 'ok' : 'warn');
+
+  const mapCount = (await idbGetAll('mapping')).length;
+  mapPill.textContent = 'Mapping: ' + mapCount;
+  mapPill.className = 'pill ' + (mapCount>0 ? 'ok' : 'warn');
+}
+
+async function renderActions(){
+  const actions = (await idbGetAll('actions'))
+    .sort((a,b)=> (b.ts||'').localeCompare(a.ts||''))
+    .slice(0,60);
+  $('actionsTable').innerHTML = actions.map(a=>`
+    <tr>
+      <td>${fmtDate(a.ts)}</td>
+      <td>${escapeHtml(a.fnsku||'')}</td>
+      <td>${escapeHtml(a.asin||'')}</td>
+      <td>${escapeHtml(a.caisse||'')}</td>
+      <td>${escapeHtml(a.action||'')}</td>
+      <td>${a.synced ? '✔' : '…'}</td>
+    </tr>
+  `).join('');
+}
+
+function showOnly(boxId){
+  const ids=['knownBox','searchBox','confirmBox','afterLinkBox','settingsBox'];
+  ids.forEach(id=>$(id).classList.add('hidden'));
+  if(boxId) $(boxId).classList.remove('hidden');
+}
+
+function proposeCaisse(){
+  const c = (localStorage.getItem(LS.lastCaisse) || '').toUpperCase();
+  $('caisseKnown').value = c;
+  $('caisseAfter').value = c;
+}
+
+/* API */
+function fetchWithTimeout(url, options = {}, ms = 15000){
+  const ctrl = new AbortController();
+  const id = setTimeout(()=>ctrl.abort(), ms);
+  return fetch(url, {...options, signal: ctrl.signal}).finally(()=>clearTimeout(id));
+}
+
+async function apiGet(params = {}) {
+  if (!apiUrl || !secret) throw new Error("Réglages manquants (API URL / SECRET).");
+
+  const u = new URL(apiUrl);
+  u.searchParams.set("secret", secret);
+
+  for (const [k, v] of Object.entries(params || {})) {
+    u.searchParams.set(k, String(v ?? ""));
+  }
+
+  // anti-cache
+  u.searchParams.set("_", String(Date.now()));
+
+  const r = await fetchWithTimeout(u.toString(), { method: "GET" }, 15000);
+  if (!r.ok) throw new Error("HTTP_" + r.status);
+  return await r.json();
+}
+
+async function apiPost(body = {}) {
+  if (!apiUrl || !secret) throw new Error("Réglages manquants (API URL / SECRET).");
+
+  // IMPORTANT : Apps Script aime bien text/plain (évite CORS/OPTIONS selon les cas)
+  const payload = JSON.stringify({ secret, ...(body || {}) });
+
+  const r = await fetchWithTimeout(
+    apiUrl,
+    {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: payload,
+    },
+    15000
+  );
+
+  if (!r.ok) throw new Error("HTTP_" + r.status);
+  return await r.json();
+}
+
+
+/* Pull master + mapping */
+async function pullAll(){
+  if(!online()) return;
+  if(!apiUrl || !secret) return;
+
+  $('syncMsg').textContent = '⏳ Mise à jour base + mapping...';
+  try{
+    const [m1, m2] = await Promise.all([
+      apiGet({op:'pull_master_full'}),
+      apiGet({op:'pull_mapping'})
+    ]);
+
+    if(m1.ok && Array.isArray(m1.products)){
+      for(const p of m1.products){
+        // Normalise
+        p.asin = normAsin(p.asin);
+        p.history = Array.isArray(p.history) ? p.history : [];
+        await idbPut('products', p);
+      }
+      localStorage.setItem(LS.lastPull, new Date().toISOString());
+    }
+
+    if(m2.ok && Array.isArray(m2.mapping)){
+      // Rebuild FNSKU map (ASIN -> [FNSKU])
+      rebuildFnskuMapFromMapping(m2.mapping);
+
+      for(const it of m2.mapping){
+        it.fnsku = normFnsku(it.fnsku);
+        it.asin = normAsin(it.asin);
+        await idbPut('mapping', it);
+      }
+    }
+
+    // IMPORTANT : les "caisses" sont ...
+    // donc on doit aussi tirer les actions du Google Sheet pour que les
+    // caisses soient identiques sur tous les telephones.
+    // (necessite l'op Apps Script: pull_actions)
+    await pullStockActions({silent:true});
+
+    // Apres pull des actions, on regenere la vue.
+    await refreshPills();
+    await renderActions();
+
+    $('syncMsg').textContent = '✅ Base + mapping à jour';
+  }catch(e){
+    $('syncMsg').textContent = '❌ Pull impossible ('+ (e.message||e) +')';
+  }
+  await refreshPills();
+}
+
+/* Push actions */
+async function pushActions(){
+  if(!online()) return;
+  if(!apiUrl || !secret) return;
+
+  const all = await idbGetAll('actions');
+  const pending = all.filter(a=>!a.synced);
+
+  if(!pending.length) return;
+
+  $('syncMsg').textContent = '⏳ Sync actions ('+pending.length+')...';
+
+  try{
+    const resp = await apiPost({op:'push_actions', actions: pending});
+    if(resp.ok){
+      // mark synced (we re-put by id)
+      const appended = resp.appended || 0;
+      const skipped = resp.skipped || 0;
+
+      // safest: mark everything we attempted as synced (ids are unique, server dedup)
+      for(const a of pending){
+        a.synced = true;
+        await idbPut('actions', a);
+      }
+
+      $('syncMsg').textContent = `✅ Sync OK (app:${appended}, skip:${skipped})`;
+      await renderActions();
+    }else{
+      $('syncMsg').textContent = '❌ Sync refusée: '+(resp.error||'');
+    }
+  }catch(e){
+    $('syncMsg').textContent = '❌ Sync impossible (réseau)';
+  }
+}
+
+
+/* Pull STOCK_ACTIONS (cursor) + reconstruire les caisses (global multi-téléphones) */
+async function pullStockActions(){
+  // ✅ Full replay sync: every device rebuilds caisse state from the same server log.
+  if(!online()) return {pulled:0};
+  if(!apiUrl || !secret) return {pulled:0};
+
+  const pulled = await pullAllActionsFromServer();
+  await rebuildCaisseStateFromActions();
+
+  // cursor not used anymore (avoids desync)
+  localStorage.removeItem(LS.actionsCursor);
+
+  return {pulled};
+}
+
+
+async function pullState(){
+  if(!online()) return {pulled:0};
+  if(!apiUrl || !secret) return {pulled:0};
+
+  const r = await apiGet('op=pull_state');
+  if(!r.ok) throw new Error(r.error||'pull_state failed');
+  const arr = r.state || [];
+
+  const sm = {};
+  for(const it of arr){
+    const fnsku = (it.fnsku||'').toUpperCase().trim();
+    const caisse = (it.caisse||'').toUpperCase().trim();
+    if(!fnsku || !caisse) continue;
+    if(!sm[fnsku]) sm[fnsku] = { asin: (it.asin||'').toUpperCase().trim(), caisses:{} };
+    if(it.asin) sm[fnsku].asin = (it.asin||'').toUpperCase().trim();
+    sm[fnsku].caisses[caisse] = Number(it.qty||0)||0;
+  }
+  saveStateMap(sm);
+  return {pulled: arr.length};
+}
+
+
+
+
+
+/* Auto sync: when online => push then pull */
+let syncLock=false;
+async function autoSync(){
+  if(syncLock) return;
+  if(!online()) return;
+  if(!apiUrl || !secret) return;
+  syncLock=true;
+  try{
+    await pushActions();
+    // Phase 2 (recommandée) : on pull STOCK_ACTIONS et on reconstruit les caisses globales
+    try{
+      const r = await pullStockActions();
+      if(r && r.pulled){
+        $('syncMsg').textContent = `✅ Stock actions mises à jour (+${r.pulled})`;
+      }
+    }catch(e){
+      // on n'empêche pas la suite (base + mapping)
+      $('syncMsg').textContent = '⚠️ Stock actions: '+(e.message||e);
+    }
+    await pullAll();
+  }finally{
+    syncLock=false;
+  }
+}
+
+/* Lookup flow */
+let currentFnsku='', selectedProduct=null;
+
+async function lookupFnsku(){
+  const rawIn = ($('fnsku').value||'').trim();
+
+  // ✅ Bonus : tu peux coller un ASIN (ou une URL Amazon) dans le champ "FNSKU"
+  // - Si un ASIN est détecté, on affiche le produit sans passer par le mapping.
+  // - Si une seule ligne de mapping pointe vers cet ASIN, on remplace automatiquement
+  //   le champ par le FNSKU correspondant pour permettre l'enregistrement.
+  const urlAsin = rawIn.match(/\b([A-Z0-9]{10})\b/i);
+  const maybeAsin = rawIn.includes('/dp/') || rawIn.includes('amazon.') ? (urlAsin ? urlAsin[1] : '') : rawIn;
+  const asinCandidate = normAsin(maybeAsin);
+  const isAsin = /^[A-Z0-9]{10}$/.test(asinCandidate);
+
+  if(isAsin){
+    // Essayez de retrouver un FNSKU unique depuis le mapping (pour autoriser "Enregistrer")
+    try{
+      const mpAll = await idbGetAll('mapping');
+      const hits = mpAll.filter(x => x && normAsin(x.asin) === asinCandidate && x.fnsku);
+      if(hits.length === 1){
+        currentFnsku = normFnsku(hits[0].fnsku);
+        $('fnsku').value = currentFnsku;
+      }else{
+        currentFnsku = ''; // affichage OK, mais pas d'"Enregistrer" sans FNSKU
+      }
+    }catch(_){ currentFnsku = ''; }
+
+    // Affiche le produit directement depuis la base (products)
+    const p = await idbGet('products', asinCandidate);
+    if(!p){
+      setStatus('ASIN reconnu, mais produit non trouvé en local. Fais "Mettre à jour base + mapping".', 'warn');
+      showOnly('settingsBox');
+      return;
+    }
+    selectedProduct = p;
+    $('knownProd').innerHTML = prodHTML(p, {fnsku: currentFnsku});
+    // Affiche les caisses (avec quantités) juste à côté des infos produit
+    // prodHTML() inclut deja le badge "caisses" (avec quantites)
+    proposeCaisse();
+    setStatus(currentFnsku ? 'ASIN reconnu → FNSKU auto (unique).' : 'ASIN reconnu (lecture seule).', 'ok');
+    showOnly('knownBox');
+    return;
+  }
+
+  // Mode normal : FNSKU
+  currentFnsku = normFnsku(rawIn);
+  $('fnsku').value = currentFnsku;
+  if(!currentFnsku){ setStatus('FNSKU vide', 'warn'); return; }
+
+  showOnly(null);
+  $('knownBox').classList.add('hidden');
+  $('searchBox').classList.add('hidden');
+  $('confirmBox').classList.add('hidden');
+  $('afterLinkBox').classList.add('hidden');
+
+  setStatus('Recherche mapping...', '');
+  const mapped = await idbGet('mapping', currentFnsku);
+
+  if(mapped && mapped.asin){
+    const asin = normAsin(mapped.asin);
+    const p = await idbGet('products', asin);
+    if(p){
+      $('knownProd').innerHTML = prodHTML(p, {fnsku: currentFnsku});
+    }else{
+      $('knownProd').innerHTML = `<div class="muted warn">Produit non trouvé dans la base locale (ASIN: ${asin}). Fais une mise à jour en ligne.</div>`;
+    }
+    proposeCaisse();
+    showOnly('knownBox');
+    setStatus('FNSKU connu.', 'ok');
+    return;
+  }
+
+  // Unknown => search
+  showOnly('searchBox');
+  setStatus('FNSKU inconnu → recherche produit.', 'warn');
+  $('q').value = '';
+  $('results').innerHTML = '';
+  $('q').focus();
+}
+
+/* Search products */
+async function doSearch(){
+  const qRaw = ($('q').value||'').trim();
+  const q = qRaw.toUpperCase();
+  const qFold = foldText(qRaw);
+  const all = await idbGetAll('products');
+
+  // Remplit le filtre compte (une seule fois) à partir des données locales
+  const selEl = $('accountFilter');
+  if(selEl && selEl.options && selEl.options.length <= 1){
+    const emails = collectAccountEmails(all); // triés
+    for(const em of emails){
+      const opt = document.createElement('option');
+      opt.value = em;
+      opt.textContent = aliasFromEmail(em);
+      selEl.appendChild(opt);
+    }
+  }
+
+  const accEmail = selEl ? (selEl.value||'').trim().toLowerCase() : '';
+
+  if(!all.length){
+    $('results').innerHTML = `<div class="item"><div class="muted err">Base produits vide. Va dans ⚙️ Réglages, puis “Mettre à jour base + mapping”.</div></div>`;
+    return;
+  }
+
+  let filtered = all
+    .filter(p=>{
+      const tFold = foldText(p.title||'');
+      const tFoldZh = foldText(p.title_zh||'');
+      const asin=(p.asin||'').toString().toUpperCase();
+      // Recherche sur titre / ASIN
+      return !qFold || tFold.includes(qFold) || tFoldZh.includes(qFold) || asin.includes(q);
+    })
+    .filter(p=>{
+      if(!accEmail) return true;
+      const hist = Array.isArray(p?.history) ? p.history : [];
+      return hist.some(h => (h.email||'').toString().trim().toLowerCase() === accEmail);
+    })
+    .sort((a,b)=>{
+      // Tri par date de commande la plus récente
+      const tb = accEmail ? getLastOrderTimestampForEmail(b, accEmail) : getLastOrderTimestamp(b);
+      const ta = accEmail ? getLastOrderTimestampForEmail(a, accEmail) : getLastOrderTimestamp(a);
+      if(tb !== ta) return tb - ta; // plus récent en premier
+      return (b.orders_count||0) - (a.orders_count||0); // fallback
+    })
+    .slice(0,60);
+
+  if(!filtered.length){
+    $('results').innerHTML = `<div class="item"><div class="muted warn">Aucun résultat.</div></div>`;
+    return;
+  }
+
+  $('results').innerHTML = filtered.map(p=>`
+    <div class="item">
+      <div class="prod">${prodHTML(p)}</div>
+      <div class="row" style="margin-top:8px">
+        <button class="btnPrimary small" data-asin="${p.asin}">Sélectionner</button>
+        <span class="pill">cmd: ${p.orders_count||0}</span>
+      </div>
+    </div>
+  `).join('');
+
+  // bind select buttons
+  $('results').querySelectorAll('button[data-asin]').forEach(btn=>{
+    btn.onclick=async ()=>{
+      const asin = btn.getAttribute('data-asin');
+      selectedProduct = await idbGet('products', asin);
+      await showConfirm();
+    };
+  });
+}
+async function showConfirm(){
+  if(!selectedProduct) return;
+  showOnly('confirmBox');
+  $('confirmProd').innerHTML = prodHTML(selectedProduct);
+  $('confirmLink').href = selectedProduct.product_url || '#';
+  $('confirmAsin').textContent = 'ASIN: ' + selectedProduct.asin;
+  $('confirmPrice').textContent = 'Prix: ' + (selectedProduct.price || '—');
+  const badge = stateBadgesForFnsku((currentFnsku||'').toUpperCase().trim());
+  $('confirmCaisses').textContent = '🧺 Stock global: ' + (badge && badge!=='—' ? badge.replace(/\s{2,}/g,' · ') : '—');
+
+  const hist = Array.isArray(selectedProduct.history) ? selectedProduct.history : [];
+  $('histTable').innerHTML = hist.slice(0,80).map(h=>`
+    <tr><td>${escapeHtml((h.order_date||'').toString())}</td><td>${escapeHtml((h.email||'').toString())}</td></tr>
+  `).join('') || `<tr><td colspan="2" class="muted">Aucun historique en cache.</td></tr>`;
+
+  $('linkStatus').textContent = '';
+}
+
+async function linkFnsku(){
+  if(!selectedProduct) return;
+  const fnsku = currentFnsku;
+  const asin = selectedProduct.asin;
+
+  if(!online()){
+    $('linkStatus').textContent = '❌ Impossible de lier sans internet (global après synchro).';
+    $('linkStatus').className = 'muted err';
+    return;
+  }
+  if(!apiUrl || !secret){
+    $('linkStatus').textContent = '❌ Réglages API manquants.';
+    $('linkStatus').className = 'muted err';
+    return;
+  }
+
+  $('linkStatus').textContent = '⏳ Liaison en cours...';
+  $('linkStatus').className = 'muted';
+
+  const resp = await apiPost({op:'link_fnsku', fnsku, asin, device: deviceId, linked_at: new Date().toISOString()});
+  if(resp.ok){
+    // update local mapping cache
+    await idbPut('mapping', {fnsku, asin, linked_at: new Date().toISOString(), device: deviceId});
+    $('linkStatus').textContent = '✅ Lien créé';
+    $('linkStatus').className = 'muted ok';
+
+    // proceed to action box
+    $('afterProd').innerHTML = prodHTML(selectedProduct, {fnsku: currentFnsku});
+    proposeCaisse();
+    showOnly('afterLinkBox');
+    setStatus('Lien OK → enregistre le rangement.', 'ok');
+    await refreshPills();
+  }else{
+    const e = resp.error || '';
+    if(e.startsWith('fnsku_already_linked:')){
+      const already = e.split(':')[1] || '';
+      $('linkStatus').textContent = '⚠️ Déjà lié à ' + already;
+      $('linkStatus').className = 'muted warn';
+      // pull mapping to update
+      await pullAll();
+    }else{
+      $('linkStatus').textContent = '❌ ' + e;
+      $('linkStatus').className = 'muted err';
+    }
+  }
+}
+
+async function saveAction({fnsku, asin, caisse, action}){
+  fnsku = normFnsku(fnsku);
+  asin = normAsin(asin);
+  caisse = (caisse||'').toString().trim().toUpperCase();
+  action = (action||'').toString().trim().toUpperCase();
+
+  if(!fnsku){ alert('FNSKU manquant'); return; }
+  if(!asin || !/^[A-Z0-9]{10}$/.test(asin)){ alert('ASIN invalide'); return; }
+  if(!caisse){ alert('Caisse obligatoire'); return; }
+
+  // update last caisse global
+  localStorage.setItem(LS.lastCaisse, caisse);
+  // update caisses per ASIN (multi-caisses)
+  applyQtyLocal(fnsku, asin, caisse, action);
+  // refresh product detail instantly (badge in prodHTML)
+  try{ if(selectedProduct){ $('knownProd').innerHTML = prodHTML(selectedProduct, {fnsku: currentFnsku}); } }catch(e){}
+  // refresh product detail badge instantly
+  if($('confirmCaisses')){
+    const badge = stateBadgesForFnsku(fnsku);
+    $('confirmCaisses').textContent = '🧺 Stock global: ' + (badge && badge!=='—' ? badge.replace(/\s{2,}/g,' · ') : '—');
+  }
+
+  const saveKey = [fnsku, asin, caisse, action].join('|');
+  const nowMs = Date.now();
+  if(saveKey === lastSaveKey && (nowMs - lastSaveAt) < 1200){
+    setStatus('⚠️ Déjà enregistré (anti-double-clic).', 'warn');
+    return;
+  }
+  lastSaveKey = saveKey; lastSaveAt = nowMs;
+  const id = makeStableActionId(fnsku, asin, caisse, action);
+  const row = {
+    id,
+    ts: new Date().toISOString(),
+    device: deviceId,
+    fnsku,
+    asin,
+    caisse,
+    action,
+    synced: false
+  };
+  await idbPut('actions', row);
+  await renderActions();
+  await refreshPills();
+
+  setStatus('Action enregistrée offline.', 'ok');
+
+  // auto sync if online
+  autoSync();
+}
+
+
+/* ===== Camera scan (Android Chrome) ===== */
+let scanStream = null;
+let scanTimer = null;
+let lastScanValue = '';
+
+function buzz_(){
+  try{ if(navigator.vibrate) navigator.vibrate(60); }catch(e){}
+}
+function beep_(){
+  try{
+    const ctx = new (window.AudioContext||window.webkitAudioContext)();
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination);
+    o.frequency.value = 880; g.gain.value = 0.05;
+    o.start();
+    setTimeout(()=>{ o.stop(); ctx.close(); }, 80);
+  }catch(e){}
+}
+
+async function startScan_(){
+  const overlay = $('scanOverlay');
+  const video = $('scanVideo');
+  const msg = $('scanMsg');
+
+  if(!overlay || !video || !msg){
+    setStatus('Scan caméra: UI manquante.', 'err');
+    return;
+  }
+
+  if(!('BarcodeDetector' in window)){
+    overlay.style.display = 'block';
+    msg.textContent = 'BarcodeDetector non supporté (Chrome Android récent requis).';
+    return;
+  }
+
+  // Stop any previous session
+  stopScan_();
+
+  overlay.style.display = 'block';
+  msg.textContent = 'Ouverture caméra…';
+
+  scanStream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: { ideal: 'environment' } },
+    audio: false
+  });
+
+  video.srcObject = scanStream;
+  await video.play();
+
+  msg.textContent = 'Scanne le code…';
+
+  const detector = new BarcodeDetector({
+    formats: ['code_128','ean_13','ean_8','qr_code','data_matrix','itf']
+  });
+
+  lastScanValue = '';
+
+  scanTimer = setInterval(async ()=>{
+    try{
+      const codes = await detector.detect(video);
+      if(!codes || !codes.length) return;
+
+      const raw = (codes[0].rawValue || '').trim();
+      if(!raw) return;
+
+      if(raw === lastScanValue) return;
+      lastScanValue = raw;
+
+      stopScan_();
+      beep_(); buzz_();
+
+      $('fnsku').value = raw;
+      $('fnsku').dispatchEvent(new Event('input', {bubbles:true}));
+      if(typeof lookupFnsku === 'function') await lookupFnsku();
+    }catch(e){
+      // ignore intermittent errors
+    }
+  }, 180);
+}
+
+function stopScan_(){
+  if(scanTimer){ clearInterval(scanTimer); scanTimer = null; }
+  if(scanStream){
+    try{ scanStream.getTracks().forEach(t=>t.stop()); }catch(e){}
+    scanStream = null;
+  }
+  const overlay = $('scanOverlay');
+  if(overlay) overlay.style.display = 'none';
+}
+
+
+/* UI bindings */
+$('btnLookup').onclick = lookupFnsku;
+$('btnClear').onclick = ()=>{
+  $('fnsku').value='';
+  $('q').value='';
+  $('results').innerHTML='';
+  selectedProduct=null;
+  currentFnsku='';
+  showOnly(null);
+  $('knownBox').classList.add('hidden');
+  $('searchBox').classList.add('hidden');
+  $('confirmBox').classList.add('hidden');
+  $('afterLinkBox').classList.add('hidden');
+  setStatus('Prêt.', '');
+  $('fnsku').focus();
+};
+
+
+$('btnScanCam').onclick = ()=>{
+  startScan_().catch(err=>{
+    $('scanOverlay').style.display = 'block';
+    $('scanMsg').textContent = 'Erreur caméra: ' + (err.message || err);
+  });
+};
+$('btnStopScan') && ($('btnStopScan').onclick = stopScan_);
+
+
+$('btnSearch').onclick = doSearch;
+$('accountFilter').addEventListener('change', ()=>doSearch());
+$('q').addEventListener('keydown', (e)=>{ if(e.key==='Enter') doSearch(); });
+
+$('btnLink').onclick = linkFnsku;
+$('btnChange').onclick = ()=>{
+  showOnly('searchBox');
+  $('linkStatus').textContent='';
+};
+
+$('btnSaveKnown').onclick = async ()=>{
+  const fnsku = currentFnsku;
+  const mapped = await idbGet('mapping', fnsku);
+  const asin = mapped ? mapped.asin : '';
+  await saveAction({fnsku, asin, caisse:$('caisseKnown').value, action:$('actionKnown').value});
+};
+
+$('btnSaveAfter').onclick = async ()=>{
+  await saveAction({fnsku: currentFnsku, asin: selectedProduct.asin, caisse:$('caisseAfter').value, action:$('actionAfter').value});
+};
+
+$('btnSettings').onclick = ()=>{
+    // init langue
+    const lm = $('langMode');
+    if(lm){ lm.value = getLang(); }
+ $('settingsBox').classList.toggle('hidden'); };
+// Langue (FR/中文)
+$('langMode') && ($('langMode').onchange = ()=>{
+  setLang($('langMode').value);
+  // refresh UI
+  if(selectedProduct) $('confirmProd').innerHTML = prodHTML(selectedProduct);
+  if($('knownProd').innerHTML) { /* re-render happens next search */ }
+  if(typeof renderLastActions==='function') renderLastActions();
+});
+
+$('btnCloseSettings').onclick = ()=>{ $('settingsBox').classList.add('hidden'); };
+
+$('btnSaveSettings').onclick = async ()=>{
+  apiUrl = ($('apiUrl').value||'').trim();
+  secret = ($('secret').value||'').trim();
+  localStorage.setItem(LS.apiUrl, apiUrl);
+  localStorage.setItem(LS.secret, secret);
+  $('settingsStatus').textContent = '✅ Sauvé. Fais “Mettre à jour base + mapping”.';
+  await refreshPills();
+};
+
+$('btnResetCache').onclick = async ()=>{
+  if(!confirm('Effacer base produits + mapping + actions locales ?')) return;
+  await idbDelAll('products');
+  await idbDelAll('mapping');
+  await idbDelAll('actions');
+  localStorage.removeItem(LS.stateMap);
+  localStorage.removeItem(LS.lastPull);
+  $('syncMsg').textContent='';
+  setStatus('Cache effacé.', 'warn');
+  await renderActions();
+  await refreshPills();
+};
+
+$('btnSyncNow').onclick = autoSync;
+$('btnPullNow').onclick = pullAll;
+$('btnRebuildState').onclick = async ()=>{
+  try{
+    $('syncMsg').textContent = '⏳ Rebuild stock serveur (depuis actions)...';
+    const r = await apiGet({op:'rebuild_state'});
+    if(!r.ok) throw new Error(r.error||'rebuild_state failed');
+
+    const p = await apiGet({op:'pull_state'});
+    if(!p.ok) throw new Error(p.error||'pull_state failed');
+
+    const arr = p.state || [];
+    const sm = {};
+    for(const it of arr){
+      const fn = (it.fnsku||'').toUpperCase().trim();
+      const ca = (it.caisse||'').toUpperCase().trim();
+      if(!fn || !ca) continue;
+      if(!sm[fn]) sm[fn] = { asin: (it.asin||'').toUpperCase().trim(), caisses:{} };
+      if(it.asin) sm[fn].asin = (it.asin||'').toUpperCase().trim();
+      sm[fn].caisses[ca] = Number(it.qty||0)||0;
+    }
+    saveStateMap(sm);
+
+    try{ if(selectedProduct){ $('knownProd').innerHTML = prodHTML(selectedProduct, {fnsku: currentFnsku}); } }catch(e){}
+    try{ if($('confirmCaisses')){ const b = stateBadgesForFnsku((currentFnsku||'').toUpperCase().trim()); $('confirmCaisses').textContent = '🧺 Stock global: ' + (b && b!=='—' ? b.replace(/\s{2,}/g,' · ') : '—'); } }catch(e){}
+
+    refreshPills();
+    $('syncMsg').textContent = `✅ Rebuild OK — rebuilt=${r.rebuilt||0} — lignes STOCK_STATE=${arr.length}`;
+  }catch(e){
+    $('syncMsg').textContent = '❌ Rebuild: '+(e.message||e);
+  }
+};
+
+/* Auto sync triggers */
+window.addEventListener('online', ()=>{
+  refreshPills();
+  $('syncMsg').textContent = '🌐 Réseau revenu → sync auto...';
+  autoSync();
+});
+window.addEventListener('offline', refreshPills);
+
+// auto sync every 45s when online (lightweight)
+setInterval(()=>{ if(online()) autoSync(); }, 45000);
+
+/* Init */
+(async function init(){
+  db = await openDB();
+  await refreshPills();
+  await renderActions();
+
+  // Autofocus for paste flow
+  $('fnsku').focus();
+
+  // If online and configured, pull base early
+  if(online() && apiUrl && secret){
+    await pullAll();
+  }
+})();
+</script>
+  <script>
 (function () {
 
   function findFnskuInput() {
