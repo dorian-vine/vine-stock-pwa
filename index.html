@@ -47,13 +47,14 @@
   <span class="pill" id="mapPill">Mapping: ?</span>
 </div>
 <div class="muted" style="margin-top:6px">
-  Scan via Binary Eye → colle le FNSKU ici. Si inconnu, recherche + double confirmation. Sync auto quand le réseau revient.
+  Scan via 📷 caméra (bouton Scanner) ou via Binary Eye → colle le FNSKU ici. Si inconnu, recherche + double confirmation. Sync auto quand le réseau revient.
 </div>
 
 <div class="card">
   <h3 style="margin:0 0 10px">1) Scanner / coller le FNSKU</h3>
   <div class="row">
     <input id="fnsku" placeholder="FNSKU (ex: X000QEDMAD)" style="flex:1;min-width:260px" />
+    <button class="btnGhost" id="btnScanCam">📷 Scanner</button>
     <button class="btnGhost" id="btnClear">Effacer</button>
   </div>
   <div class="row" style="margin-top:10px">
@@ -62,6 +63,25 @@
     <span class="muted" id="status">Prêt.</span>
   </div>
 </div>
+
+
+<!-- CAMERA SCAN OVERLAY (Android Chrome) -->
+<div id="scanOverlay" style="display:none; position:fixed; inset:0; background:#000; z-index:9999;">
+  <video id="scanVideo" autoplay playsinline
+         style="width:100%; height:100%; object-fit:cover;"></video>
+
+  <!-- Cadre visuel -->
+  <div style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; pointer-events:none;">
+    <div style="width:min(80vw,420px); height:180px; border:2px solid rgba(255,255,255,.9); border-radius:16px;"></div>
+  </div>
+
+  <!-- Barre top -->
+  <div style="position:absolute; top:0; left:0; right:0; padding:12px; display:flex; gap:10px; align-items:center;">
+    <button id="btnStopScan" class="btn" style="background:#fff; color:#000; border:none; border-radius:12px; padding:10px 12px; font-size:16px;">✕ Fermer</button>
+    <div id="scanMsg" style="color:#fff; font-weight:600;"></div>
+  </div>
+</div>
+
 
 <!-- PRODUIT CONNU -->
 <div class="card hidden" id="knownBox">
@@ -1281,6 +1301,98 @@ async function saveAction({fnsku, asin, caisse, action}){
   autoSync();
 }
 
+
+/* ===== Camera scan (Android Chrome) ===== */
+let scanStream = null;
+let scanTimer = null;
+let lastScanValue = '';
+
+function buzz_(){
+  try{ if(navigator.vibrate) navigator.vibrate(60); }catch(e){}
+}
+function beep_(){
+  try{
+    const ctx = new (window.AudioContext||window.webkitAudioContext)();
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination);
+    o.frequency.value = 880; g.gain.value = 0.05;
+    o.start();
+    setTimeout(()=>{ o.stop(); ctx.close(); }, 80);
+  }catch(e){}
+}
+
+async function startScan_(){
+  const overlay = $('scanOverlay');
+  const video = $('scanVideo');
+  const msg = $('scanMsg');
+
+  if(!overlay || !video || !msg){
+    setStatus('Scan caméra: UI manquante.', 'err');
+    return;
+  }
+
+  if(!('BarcodeDetector' in window)){
+    overlay.style.display = 'block';
+    msg.textContent = 'BarcodeDetector non supporté (Chrome Android récent requis).';
+    return;
+  }
+
+  // Stop any previous session
+  stopScan_();
+
+  overlay.style.display = 'block';
+  msg.textContent = 'Ouverture caméra…';
+
+  scanStream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: { ideal: 'environment' } },
+    audio: false
+  });
+
+  video.srcObject = scanStream;
+  await video.play();
+
+  msg.textContent = 'Scanne le code…';
+
+  const detector = new BarcodeDetector({
+    formats: ['code_128','ean_13','ean_8','qr_code','data_matrix','itf']
+  });
+
+  lastScanValue = '';
+
+  scanTimer = setInterval(async ()=>{
+    try{
+      const codes = await detector.detect(video);
+      if(!codes || !codes.length) return;
+
+      const raw = (codes[0].rawValue || '').trim();
+      if(!raw) return;
+
+      if(raw === lastScanValue) return;
+      lastScanValue = raw;
+
+      stopScan_();
+      beep_(); buzz_();
+
+      $('fnsku').value = raw;
+      $('fnsku').dispatchEvent(new Event('input', {bubbles:true}));
+      if(typeof lookupFnsku === 'function') await lookupFnsku();
+    }catch(e){
+      // ignore intermittent errors
+    }
+  }, 180);
+}
+
+function stopScan_(){
+  if(scanTimer){ clearInterval(scanTimer); scanTimer = null; }
+  if(scanStream){
+    try{ scanStream.getTracks().forEach(t=>t.stop()); }catch(e){}
+    scanStream = null;
+  }
+  const overlay = $('scanOverlay');
+  if(overlay) overlay.style.display = 'none';
+}
+
+
 /* UI bindings */
 $('btnLookup').onclick = lookupFnsku;
 $('btnClear').onclick = ()=>{
@@ -1297,6 +1409,16 @@ $('btnClear').onclick = ()=>{
   setStatus('Prêt.', '');
   $('fnsku').focus();
 };
+
+
+$('btnScanCam').onclick = ()=>{
+  startScan_().catch(err=>{
+    $('scanOverlay').style.display = 'block';
+    $('scanMsg').textContent = 'Erreur caméra: ' + (err.message || err);
+  });
+};
+$('btnStopScan') && ($('btnStopScan').onclick = stopScan_);
+
 
 $('btnSearch').onclick = doSearch;
 $('accountFilter').addEventListener('change', ()=>doSearch());
