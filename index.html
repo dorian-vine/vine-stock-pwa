@@ -78,6 +78,7 @@
   <!-- Barre top -->
   <div style="position:absolute; top:0; left:0; right:0; padding:12px; display:flex; gap:10px; align-items:center;">
     <button id="btnStopScan" class="btn" style="background:#fff; color:#000; border:none; border-radius:12px; padding:10px 12px; font-size:16px;">✕ Fermer</button>
+    <button id="btnTorch" class="btn" style="background:rgba(255,255,255,.15); color:#fff; border:1px solid rgba(255,255,255,.35); border-radius:12px; padding:10px 12px; font-size:16px;">🔦 Flash</button>
     <div id="scanMsg" style="color:#fff; font-weight:600;"></div>
   </div>
 </div>
@@ -1062,9 +1063,17 @@ async function lookupFnsku(){
     }catch(_){ currentFnsku = ''; }
 
     // Affiche le produit directement depuis la base (products)
-    const p = await idbGet('products', asinCandidate);
+    let p = await idbGet('products', asinCandidate);
     if(!p){
-      setStatus('ASIN reconnu, mais produit non trouvé en local. Fais "Mettre à jour base + mapping".', 'warn');
+      // Auto-récupération: on rafraîchit la base + mapping une fois, puis on retente.
+      try{
+        setStatus('Produit pas encore en cache local → mise à jour automatique de la base…', 'warn');
+        await pullAll(); // base + mapping + (optionnel) state
+        p = await idbGet('products', asinCandidate);
+      }catch(_){}
+    }
+    if(!p){
+      setStatus('ASIN reconnu, mais produit non trouvé en local. Clique "Mettre à jour base + mapping".', 'warn');
       showOnly('settingsBox');
       return;
     }
@@ -1302,10 +1311,13 @@ async function saveAction({fnsku, asin, caisse, action}){
 }
 
 
+
 /* ===== Camera scan (Android Chrome) ===== */
 let scanStream = null;
 let scanTimer = null;
 let lastScanValue = '';
+let scanTrack = null;
+let torchOn = false;
 
 function buzz_(){
   try{ if(navigator.vibrate) navigator.vibrate(60); }catch(e){}
@@ -1321,10 +1333,26 @@ function beep_(){
   }catch(e){}
 }
 
+async function setTorch_(on){
+  torchOn = !!on;
+  const btn = $('btnTorch');
+  try{
+    if(!scanTrack) throw new Error('no track');
+    const caps = scanTrack.getCapabilities ? scanTrack.getCapabilities() : {};
+    if(!caps || !('torch' in caps) || caps.torch !== true) throw new Error('torch not supported');
+    await scanTrack.applyConstraints({ advanced: [{ torch: torchOn }] });
+    if(btn) btn.style.opacity = torchOn ? '1' : '0.7';
+  }catch(e){
+    // torch not supported
+    if(btn) btn.style.opacity = '0.4';
+  }
+}
+
 async function startScan_(){
   const overlay = $('scanOverlay');
   const video = $('scanVideo');
   const msg = $('scanMsg');
+  const btnTorch = $('btnTorch');
 
   if(!overlay || !video || !msg){
     setStatus('Scan caméra: UI manquante.', 'err');
@@ -1350,6 +1378,21 @@ async function startScan_(){
 
   video.srcObject = scanStream;
   await video.play();
+
+  // Track for torch
+  scanTrack = scanStream.getVideoTracks ? (scanStream.getVideoTracks()[0] || null) : null;
+  torchOn = false;
+  if(btnTorch){
+    btnTorch.style.opacity = '0.7';
+    // Enable/disable torch button depending on capabilities
+    try{
+      const caps = scanTrack && scanTrack.getCapabilities ? scanTrack.getCapabilities() : {};
+      const supported = !!(caps && ('torch' in caps) && caps.torch === true);
+      btnTorch.style.display = supported ? 'inline-block' : 'none';
+    }catch(_){
+      btnTorch.style.display = 'none';
+    }
+  }
 
   msg.textContent = 'Scanne le code…';
 
@@ -1384,6 +1427,18 @@ async function startScan_(){
 
 function stopScan_(){
   if(scanTimer){ clearInterval(scanTimer); scanTimer = null; }
+  // turn torch off before stopping
+  try{ if(scanTrack) scanTrack.applyConstraints({ advanced: [{ torch: false }] }); }catch(e){}
+  torchOn = false;
+  scanTrack = null;
+
+  if(scanStream){
+    try{ scanStream.getTracks().forEach(t=>t.stop()); }catch(e){}
+    scanStream = null;
+  }
+  const overlay = $('scanOverlay');
+  if(overlay) overlay.style.display = 'none';
+}
   if(scanStream){
     try{ scanStream.getTracks().forEach(t=>t.stop()); }catch(e){}
     scanStream = null;
@@ -1418,6 +1473,7 @@ $('btnScanCam').onclick = ()=>{
   });
 };
 $('btnStopScan') && ($('btnStopScan').onclick = stopScan_);
+$('btnTorch') && ($('btnTorch').onclick = ()=>{ setTorch_(!torchOn); });
 
 
 $('btnSearch').onclick = doSearch;
