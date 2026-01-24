@@ -1045,6 +1045,34 @@ async function lookupFnsku(){
 
   const rawIn = ($('fnsku').value||'').trim();
 
+  // ✅ ASIN saisi dans le champ : recherche produit (local d'abord), sans afficher "FNSKU inconnu"
+  const __asinFromUrl = (rawIn.match(/\/dp\/([A-Z0-9]{10})/i)||[])[1] || '';
+  const __asinFromTag = (rawIn.match(/\bASIN[:\s]*([A-Z0-9]{10})\b/i)||[])[1] || '';
+  const __asinDirect  = (rawIn.match(/\b(B0[A-Z0-9]{8})\b/i)||[])[1] || '';
+  const __asinTyped = (__asinFromUrl || __asinFromTag || __asinDirect || '').toUpperCase();
+
+  if(__asinTyped && /^[A-Z0-9]{10}$/.test(__asinTyped)){
+    let p = null;
+    try{ p = await idbGet('products', __asinTyped); }catch(e){ p = null; }
+    if(!p){
+      try{
+        const all = await idbGetAll('products');
+        p = all.find(x => x && normAsin(x.asin) === __asinTyped) || null;
+      }catch(e){ p = null; }
+    }
+    if(p){
+      selectedProduct = p;
+      currentFnsku = '';
+      $('knownProd').innerHTML = prodHTML(p, {fnsku:''});
+      showOnly('knownBox');
+      setStatus('ASIN saisi ✅ — produit trouvé (local).', 'ok');
+      return;
+    }
+    // Sinon : on laisse le flux normal faire la recherche produit (serveur),
+    // mais on évite le message trompeur "FNSKU inconnu".
+  }
+
+
   // ✅ Mode ASIN supprimé : on ne bascule PLUS jamais en "Code reconnu".
   // Si l'utilisateur colle une URL Amazon ou un ASIN, on tente juste de retrouver
   // un FNSKU via le mapping (si unique), puis on continue en mode FNSKU.
@@ -1112,7 +1140,7 @@ async function lookupFnsku(){
 
   // Unknown => search
   showOnly('searchBox');
-  setStatus('FNSKU inconnu → recherche produit.', 'warn');
+  setStatus((/^B0[A-Z0-9]{8}$/i.test(rawIn) || /\/dp\//i.test(rawIn) || /^\s*ASIN\s*[:\s]/i.test(rawIn)) ? 'ASIN saisi — recherche produit…' : 'FNSKU inconnu → recherche produit.', 'warn');
   $('q').value = '';
   $('results').innerHTML = '';
   $('q').focus();
