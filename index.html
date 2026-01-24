@@ -1319,6 +1319,9 @@ async function saveAction({fnsku, asin, caisse, action}){
 
   setStatus('Action enregistrée offline.', 'ok');
 
+  // ✅ Retour auto au scan
+  resetToScan();
+
   // auto sync if online
   autoSync();
 }
