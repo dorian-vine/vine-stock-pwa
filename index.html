@@ -1090,7 +1090,19 @@ async function lookupFnsku(){
     if(p){
       $('knownProd').innerHTML = prodHTML(p, {fnsku: currentFnsku});
     }else{
-      $('knownProd').innerHTML = `<div class="muted warn">Produit non trouvé dans la base locale (ASIN: ${asin}). Fais une mise à jour en ligne.</div>`;
+      // ✅ Produit manquant en cache local : on force une MAJ en ligne puis on réessaie 1 fois
+      if(online()){
+        setStatus('Cache incomplet → mise à jour base + mapping...', 'warn');
+        await pullAll();
+        const p2 = await idbGet('products', asin);
+        if(p2){
+          $('knownProd').innerHTML = prodHTML(p2, {fnsku: currentFnsku});
+        }else{
+          $('knownProd').innerHTML = `<div class="muted warn">FNSKU connu, mais produit absent du cache (ASIN: ${asin}). Clique "Mettre à jour base + mapping" et réessaie.</div>`;
+        }
+      }else{
+        $('knownProd').innerHTML = `<div class="muted warn">FNSKU connu (ASIN: ${asin}) mais produit absent du cache et tu es offline.</div>`;
+      }
     }
     proposeCaisse();
     showOnly('knownBox');
