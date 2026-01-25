@@ -1671,6 +1671,16 @@ setInterval(()=>{ if(online()) autoSync(); }, 45000);
 
 /* Init */
 (async function init(){
+  // 📦 Voir contenu d'une caisse
+  const btnView = $('btnViewCaisse');
+  const caisseView = $('caisseView');
+  if(btnView) btnView.onclick = viewCaisse;
+  if(caisseView){
+    caisseView.addEventListener('keydown', (e)=>{
+      if(e.key==='Enter'){ e.preventDefault(); viewCaisse(); }
+    });
+  }
+
   db = await openDB();
   await refreshPills();
   await renderActions();
@@ -1683,6 +1693,56 @@ setInterval(()=>{ if(online()) autoSync(); }, 45000);
     await pullAll();
   }
 })();
+
+
+// === Caisse view (Stock_State) ===
+async function viewCaisse(){
+  const c = ($('caisseView').value||'').toUpperCase().trim();
+  if(!c){ $('caisseList').innerHTML = '<div class="muted">Entre une caisse.</div>'; return; }
+  const sm = loadStateMap();
+  const rows = [];
+  for(const [fn, obj] of Object.entries(sm||{})){
+    if(!obj || !obj.caisses) continue;
+    const q = Number(obj.caisses[c]||0)||0;
+    if(q<=0) continue;
+    rows.push({fnsku: fn, asin: (obj.asin||'').toUpperCase(), qty: q});
+  }
+  if(!rows.length){
+    $('caisseList').innerHTML = '<div class="muted">Caisse '+c+' : vide (selon Stock_State).</div>';
+    return;
+  }
+  // enrich with product title/photo if available
+  for(const r of rows){
+    if(r.asin){
+      try{
+        const p = await idbGet('products', r.asin);
+        if(p){
+          r.title = p.title || '';
+          r.photo = p.photo_url || '';
+          r.url = p.product_url || '';
+        }
+      }catch(e){}
+    }
+  }
+  rows.sort((a,b)=> (a.title||a.asin).localeCompare((b.title||b.asin)));
+  const htmlRows = rows.map(r=>{
+    const t = (r.title||r.asin||'').replace(/</g,'&lt;');
+    const sub = `${r.qty}× <b>${c}</b>`;
+    const img = r.photo ? `<img src="${r.photo}" style="width:46px;height:46px;object-fit:cover;border-radius:10px">` : '';
+    const linkOpen = r.url ? `<a href="${r.url}" target="_blank" class="muted" style="text-decoration:underline">ouvrir</a>` : '';
+    return `<div class="row" style="align-items:flex-start;gap:10px;padding:10px;border:1px solid #eee;border-radius:14px;margin-bottom:8px">
+      ${img}
+      <div style="flex:1">
+        <div style="font-weight:800">${t}</div>
+        <div class="muted">${r.fnsku} · ${r.asin||'—'} · ${sub} · ${linkOpen}</div>
+      </div>
+    </div>`;
+  }).join('');
+  $('caisseList').innerHTML = `<div class="muted" style="margin-bottom:8px">Caisse <b>${c}</b> — ${rows.length} références</div>` + htmlRows;
+}
+
+
+
 </script>
   <script>
 (function () {
@@ -1732,49 +1792,3 @@ setInterval(()=>{ if(online()) autoSync(); }, 45000);
 </script>
 </body>
 </html>
-async function viewCaisse(){
-  const c = ($('caisseView').value||'').toUpperCase().trim();
-  if(!c){ $('caisseList').innerHTML = '<div class="muted">Entre une caisse.</div>'; return; }
-  const sm = loadStateMap();
-  const rows = [];
-  for(const [fn, obj] of Object.entries(sm||{})){
-    if(!obj || !obj.caisses) continue;
-    const q = Number(obj.caisses[c]||0)||0;
-    if(q<=0) continue;
-    rows.push({fnsku: fn, asin: (obj.asin||'').toUpperCase(), qty: q});
-  }
-  if(!rows.length){
-    $('caisseList').innerHTML = '<div class="muted">Caisse '+c+' : vide (selon Stock_State).</div>';
-    return;
-  }
-  // enrich with product title/photo if available
-  for(const r of rows){
-    if(r.asin){
-      try{
-        const p = await idbGet('products', r.asin);
-        if(p){
-          r.title = p.title || '';
-          r.photo = p.photo_url || '';
-          r.url = p.product_url || '';
-        }
-      }catch(e){}
-    }
-  }
-  rows.sort((a,b)=> (a.title||a.asin).localeCompare((b.title||b.asin)));
-  const htmlRows = rows.map(r=>{
-    const t = (r.title||r.asin||'').replace(/</g,'&lt;');
-    const sub = `${r.qty}× <b>${c}</b>`;
-    const img = r.photo ? `<img src="${r.photo}" style="width:46px;height:46px;object-fit:cover;border-radius:10px">` : '';
-    const linkOpen = r.url ? `<a href="${r.url}" target="_blank" class="muted" style="text-decoration:underline">ouvrir</a>` : '';
-    return `<div class="row" style="align-items:flex-start;gap:10px;padding:10px;border:1px solid #eee;border-radius:14px;margin-bottom:8px">
-      ${img}
-      <div style="flex:1">
-        <div style="font-weight:800">${t}</div>
-        <div class="muted">${r.fnsku} · ${r.asin||'—'} · ${sub} · ${linkOpen}</div>
-      </div>
-    </div>`;
-  }).join('');
-  $('caisseList').innerHTML = `<div class="muted" style="margin-bottom:8px">Caisse <b>${c}</b> — ${rows.length} références</div>` + htmlRows;
-}
-
-
