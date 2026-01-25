@@ -172,18 +172,6 @@
   <div class="muted">Caisse proposée = dernière caisse utilisée (globale).</div>
 </div>
 
-
-<!-- CAISSE VIEW -->
-<div class="card">
-  <h3 style="margin:0 0 10px">📦 Contenu d'une caisse</h3>
-  <div class="row">
-    <input id="caisseView" placeholder="Caisse (ex: C3)" />
-    <button class="btnGhost small" id="btnViewCaisse">Voir</button>
-  </div>
-  <div class="muted">Liste basée sur <b>Stock_State</b> (central) synchronisé.</div>
-  <div id="caisseList" style="margin-top:10px"></div>
-</div>
-
 <!-- HISTORIQUE LOCAL (actions) -->
 <div class="card">
   <h3 style="margin:0 0 10px">🕓 Dernières actions (local)</h3>
@@ -423,89 +411,6 @@ function applyQtyLocal(fnsku, asin, caisse, action){
   saveStateMap(sm);
 }
 
-
-
-/* Caisse view */
-function escHtml_(s){
-  return (s||'').toString()
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-}
-
-async function viewCaisse(){
-  const c = ($('caisseView')?.value || '').toUpperCase().trim();
-  const box = $('caisseList');
-  if(!box) return;
-  if(!c){
-    box.innerHTML = `<div class="muted">Entre une caisse.</div>`;
-    return;
-  }
-
-  const sm = loadStateMap();
-  const rows = [];
-  for(const [fn, obj] of Object.entries(sm||{})){
-    if(!obj || !obj.caisses) continue;
-    const q = Number(obj.caisses[c]||0)||0;
-    if(q<=0) continue;
-    rows.push({ fnsku: fn, asin: (obj.asin||'').toUpperCase().trim(), qty: q });
-  }
-  if(!rows.length){
-    box.innerHTML = `<div class="muted">Caisse <b>${escHtml_(c)}</b> : vide (selon Stock_State).</div>`;
-    return;
-  }
-
-  // enrich with product info if available
-  const uniqAsins = Array.from(new Set(rows.map(r=>r.asin).filter(Boolean)));
-  const prodByAsin = {};
-  await Promise.all(uniqAsins.map(async (a)=>{
-    try{ prodByAsin[a] = await idbGet('products', a); }catch(e){ prodByAsin[a]=null; }
-  }));
-
-  rows.sort((a,b)=>{
-    const pa = prodByAsin[a.asin]?.title || a.asin || a.fnsku;
-    const pb = prodByAsin[b.asin]?.title || b.asin || b.fnsku;
-    return String(pa).localeCompare(String(pb));
-  });
-
-  let html = `<div class="muted">Caisse <b>${escHtml_(c)}</b> — <b>${rows.length}</b> références</div>`;
-  html += `<div style="margin-top:8px;border:1px solid #eee;border-radius:12px;overflow:hidden">`;
-  html += rows.map(r=>{
-    const p = prodByAsin[r.asin] || null;
-    const title = p?.title ? escHtml_(p.title) : '';
-    const img = p?.photo_url ? `<img src="${escHtml_(p.photo_url)}" alt="" style="width:42px;height:42px;object-fit:cover;border-radius:10px;border:1px solid #eee">` : '';
-    const open = p?.product_url ? `<a href="${escHtml_(p.product_url)}" target="_blank" rel="noopener">ouvrir</a>` : '';
-    const label = title || escHtml_(r.asin || r.fnsku);
-    const sub = `<div class="muted" style="font-size:12px">FNSKU: <b>${escHtml_(r.fnsku)}</b> · ASIN: <b>${escHtml_(r.asin||'—')}</b> · Qté: <b>${r.qty}</b> ${open ? '· '+open : ''}</div>`;
-    return `
-      <div style="display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-top:1px solid #eee">
-        ${img ? `<div style="flex:0 0 auto">${img}</div>` : ``}
-        <div style="flex:1 1 auto;min-width:0">
-          <div style="font-weight:800;line-height:1.2">${label}</div>
-          ${sub}
-        </div>
-        <div style="flex:0 0 auto">
-          <button class="btnGhost small" data-use-fnsku="${escHtml_(r.fnsku)}">Utiliser</button>
-        </div>
-      </div>
-    `;
-  }).join('');
-  html += `</div>`;
-  box.innerHTML = html;
-
-  // delegate "Utiliser"
-  box.querySelectorAll('button[data-use-fnsku]').forEach(btn=>{
-    btn.onclick = async ()=>{
-      const fn = btn.getAttribute('data-use-fnsku') || '';
-      if(!fn) return;
-      $('fnsku').value = fn;
-      $('fnsku').dispatchEvent(new Event('input', {bubbles:true}));
-      if(typeof lookupFnsku === 'function'){
-        await lookupFnsku();
-      }
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    };
-  });
-}
 
 /* Helpers */
 function setStatus(msg, cls=''){
@@ -1022,10 +927,8 @@ async function pullAll(){
 
     // Apres pull des actions, on regenere la vue.
     await refreshPills();
-    // ✅ Retour automatique au scan
-  resetToScan();
-await renderActions();
-
+    // (pas de retour auto ici)
+    await renderActions();
     $('syncMsg').textContent = '✅ Base + mapping à jour';
   }catch(e){
     $('syncMsg').textContent = '❌ Pull impossible ('+ (e.message||e) +')';
@@ -1408,13 +1311,39 @@ async function linkFnsku(){
   }
 }
 
+async function resolveFnskuFromAsinIfNeeded(fnsku, asin){
+  fnsku = normFnsku(fnsku);
+  if(fnsku) return fnsku;
+  asin = normAsin(asin);
+  if(!asin) return '';
+  try{
+    const rows = await idbGetAll('mapping');
+    const list = Array.from(new Set(rows
+      .filter(r=> normAsin(r.asin) === asin)
+      .map(r=> normFnsku(r.fnsku))
+      .filter(Boolean)
+    ));
+    if(list.length === 1) return list[0];
+    if(list.length > 1){
+      const msg = "Plusieurs FNSKU pour cet ASIN:\n\n" + list.map((x,i)=>`${i+1}) ${x}`).join("\n") + "\n\nChoisis le numéro :";
+      const v = prompt(msg, "1");
+      const n = parseInt((v||'').trim(), 10);
+      if(!n || n<1 || n>list.length) return '';
+      return list[n-1];
+    }
+  }catch(e){}
+  return '';
+}
+
 async function saveAction({fnsku, asin, caisse, action}){
   fnsku = normFnsku(fnsku);
   asin = normAsin(asin);
   caisse = (caisse||'').toString().trim().toUpperCase();
   action = (action||'').toString().trim().toUpperCase();
 
-  if(!fnsku){ alert('FNSKU manquant'); return; }
+  // Si l'utilisateur a tapé un ASIN dans le champ, on tente de retrouver le FNSKU via le mapping local.
+  fnsku = await resolveFnskuFromAsinIfNeeded(fnsku, asin);
+  if(!fnsku){ alert('FNSKU manquant (scanne/colle le FNSKU ou valide le lien FNSKU→ASIN).'); return; }
   if(!asin || !/^[A-Z0-9]{10}$/.test(asin)){ alert('ASIN invalide'); return; }
   if(!caisse){ alert('Caisse obligatoire'); return; }
 
@@ -1596,12 +1525,6 @@ $('btnFlash') && ($('btnFlash').onclick = () => {
     track.applyConstraints({ advanced: [{ torch: flashOn }] });
   }catch(e){}
 });
-
-// 📦 Contenu d'une caisse
-$('btnViewCaisse') && ($('btnViewCaisse').onclick = viewCaisse);
-$('caisseView') && ($('caisseView').addEventListener('keydown', (e)=>{ if(e.key==='Enter') viewCaisse(); }));
-
-
 
 $('btnSearch').onclick = doSearch;
 $('accountFilter').addEventListener('change', ()=>doSearch());
