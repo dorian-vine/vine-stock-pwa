@@ -36,7 +36,22 @@
     .btnDanger{background:#fff;border:1px solid #f2c; border-radius:12px}
     .small{font-size:13px;padding:8px 10px}
     .hidden{display:none}
-  </style>
+  
+    /* === Action visual status === */
+    select.actionADD{ background:#16a34a; color:#fff; font-weight:800; }
+    select.actionREMOVE{ background:#f59e0b; color:#111827; font-weight:800; }
+    select.actionSOLD{ background:#dc2626; color:#fff; font-weight:900; }
+    select.actionMOVE{ background:#e5e7eb; color:#111827; font-weight:800; }
+
+    .actPill{ display:inline-block; padding:6px 10px; border-radius:999px; font-weight:900; font-size:12px; }
+    .actPill.add{ background:#16a34a; color:#fff; }
+    .actPill.remove{ background:#f59e0b; color:#111827; }
+    .actPill.sold{ background:#dc2626; color:#fff; }
+    .actPill.move{ background:#e5e7eb; color:#111827; }
+
+    .soldBlock{ padding:10px 12px; border-radius:12px; background:#fee2e2; color:#7f1d1d; font-weight:900; }
+
+</style>
 </head>
 <body>
 
@@ -86,12 +101,9 @@
   <hr style="border:none;border-top:1px solid #eee;margin:12px 0">
   <div class="row">
     <input id="caisseKnown" placeholder="Caisse (ex: A3)" />
-    <select id="actionKnown">
-      <option value="ADD">ADD (ranger)</option>
-      <option value="MOVE">MOVE</option>
-      <option value="REMOVE">REMOVE</option>
-      <option value="SOLD">SOLD</option>
-    </select>
+    \1
+    <span class="actPill add" id="pill_actionKnown">ADD</span>
+    <div class="soldBlock" id="soldWarn_actionKnown" style="display:none">⚠️ SOLD est définitif. Confirmation requise.</div>
     <button class="btnPrimary" id="btnSaveKnown">✅ Enregistrer</button>
   </div>
   <div class="muted">Caisse proposée = dernière caisse utilisée (globale).</div>
@@ -161,16 +173,25 @@
   <div class="prod" id="afterProd"></div>
   <div class="row" style="margin-top:10px">
     <input id="caisseAfter" placeholder="Caisse (ex: A3)" />
-    <select id="actionAfter">
-      <option value="ADD">ADD (ranger)</option>
-      <option value="MOVE">MOVE</option>
-      <option value="REMOVE">REMOVE</option>
-      <option value="SOLD">SOLD</option>
-    </select>
+    \1
+    <span class="actPill add" id="pill_actionAfter">ADD</span>
+    <div class="soldBlock" id="soldWarn_actionAfter" style="display:none">⚠️ SOLD est définitif. Confirmation requise.</div>
     <button class="btnPrimary" id="btnSaveAfter">✅ Enregistrer</button>
   </div>
   <div class="muted">Caisse proposée = dernière caisse utilisée (globale).</div>
 </div>
+
+
+<div class="card" id="caisseViewBox">
+  <h3 style="margin:0 0 10px">📦 Contenu d'une caisse</h3>
+  <div class="row">
+    <input id="caisseView" placeholder="Caisse (ex: C3)" />
+    <button class="btnGhost" id="btnViewCaisse">Voir</button>
+  </div>
+  <div class="muted">Liste basée sur Stock_State (central) synchronisé.</div>
+  <div id="caisseList" style="margin-top:10px"></div>
+</div>
+
 
 <!-- HISTORIQUE LOCAL (actions) -->
 <div class="card">
@@ -418,6 +439,36 @@ function setStatus(msg, cls=''){
   $('status').className = 'muted ' + cls;
 }
 function online(){ return navigator.onLine; }
+
+function setSelectActionDefault(selId){
+  const el = $(selId);
+  if(!el) return;
+  el.value = 'ADD'; // ✅ toujours ADD par défaut
+  updateActionVisual(el);
+}
+function updateActionVisual(sel){
+  if(!sel) return;
+  const v = (sel.value||'ADD').toUpperCase();
+  sel.classList.remove('actionADD','actionREMOVE','actionSOLD','actionMOVE');
+  sel.classList.add('action'+v);
+  const pill = document.getElementById('pill_'+sel.id);
+  const warn = document.getElementById('soldWarn_'+sel.id);
+  if(pill){
+    pill.textContent = v;
+    pill.className = 'actPill ' + (v==='ADD'?'add':v==='REMOVE'?'remove':v==='SOLD'?'sold':'move');
+  }
+  if(warn){
+    warn.style.display = (v==='SOLD') ? 'block' : 'none';
+  }
+}
+// Confirmation bloquante pour SOLD
+async function confirmIfSold(sel){
+  const v = (sel && sel.value || '').toUpperCase();
+  if(v !== 'SOLD') return true;
+  return confirm('Confirmer SOLD ? (action définitive)');
+}
+
+
 
 function normFnsku(v){
   return (v||'').toString().trim().toUpperCase();
@@ -821,6 +872,9 @@ function resetToScan(){
     selectedProduct = null;
     currentFnsku = '';
     showOnly('scanBox');
+
+    try{ $('actionKnown').value = 'ADD'; }catch(e){}
+    try{ $('actionAfter').value = 'ADD'; }catch(e){}
     setStatus('Prêt.', '');
     $('fnsku').value = '';
     $('fnsku').focus();
@@ -833,6 +887,10 @@ function showOnly(boxId){
   const ids=['knownBox','searchBox','confirmBox','afterLinkBox','settingsBox'];
   ids.forEach(id=>$(id).classList.add('hidden'));
   if(boxId) $(boxId).classList.remove('hidden');
+
+  // ✅ action par défaut
+  if(id==='knownBox') setSelectActionDefault('actionKnown');
+  if(id==='afterLinkBox') setSelectActionDefault('actionAfter');
 }
 
 function proposeCaisse(){
@@ -927,8 +985,6 @@ async function pullAll(){
 
     // Apres pull des actions, on regenere la vue.
     await refreshPills();
-    // ✅ Retour automatique au scan
-  resetToScan();
 await renderActions();
 
     $('syncMsg').textContent = '✅ Base + mapping à jour';
@@ -1065,6 +1121,7 @@ async function lookupFnsku(){
       currentFnsku = '';
       $('knownProd').innerHTML = prodHTML(p, {fnsku:''});
       showOnly('knownBox');
+    try{ $('actionKnown').value='ADD'; }catch(e){}
       setStatus('ASIN saisi ✅ — produit trouvé (local).', 'ok');
       return;
     }
@@ -1134,6 +1191,7 @@ async function lookupFnsku(){
     }
     proposeCaisse();
     showOnly('knownBox');
+    try{ $('actionKnown').value='ADD'; }catch(e){}
     setStatus('FNSKU connu.', 'ok');
     return;
   }
@@ -1513,6 +1571,9 @@ $('btnChange').onclick = ()=>{
 };
 
 $('btnSaveKnown').onclick = async ()=>{
+    const __sel = $('actionKnown');
+    if(!await confirmIfSold(__sel)) return;
+
   const fnsku = currentFnsku;
   const mapped = await idbGet('mapping', fnsku);
   const asin = mapped ? mapped.asin : '';
@@ -1520,6 +1581,9 @@ $('btnSaveKnown').onclick = async ()=>{
 };
 
 $('btnSaveAfter').onclick = async ()=>{
+    const __sel = $('actionAfter');
+    if(!await confirmIfSold(__sel)) return;
+
   await saveAction({fnsku: currentFnsku, asin: selectedProduct.asin, caisse:$('caisseAfter').value, action:$('actionAfter').value});
 };
 
@@ -1668,3 +1732,49 @@ setInterval(()=>{ if(online()) autoSync(); }, 45000);
 </script>
 </body>
 </html>
+async function viewCaisse(){
+  const c = ($('caisseView').value||'').toUpperCase().trim();
+  if(!c){ $('caisseList').innerHTML = '<div class="muted">Entre une caisse.</div>'; return; }
+  const sm = loadStateMap();
+  const rows = [];
+  for(const [fn, obj] of Object.entries(sm||{})){
+    if(!obj || !obj.caisses) continue;
+    const q = Number(obj.caisses[c]||0)||0;
+    if(q<=0) continue;
+    rows.push({fnsku: fn, asin: (obj.asin||'').toUpperCase(), qty: q});
+  }
+  if(!rows.length){
+    $('caisseList').innerHTML = '<div class="muted">Caisse '+c+' : vide (selon Stock_State).</div>';
+    return;
+  }
+  // enrich with product title/photo if available
+  for(const r of rows){
+    if(r.asin){
+      try{
+        const p = await idbGet('products', r.asin);
+        if(p){
+          r.title = p.title || '';
+          r.photo = p.photo_url || '';
+          r.url = p.product_url || '';
+        }
+      }catch(e){}
+    }
+  }
+  rows.sort((a,b)=> (a.title||a.asin).localeCompare((b.title||b.asin)));
+  const htmlRows = rows.map(r=>{
+    const t = (r.title||r.asin||'').replace(/</g,'&lt;');
+    const sub = `${r.qty}× <b>${c}</b>`;
+    const img = r.photo ? `<img src="${r.photo}" style="width:46px;height:46px;object-fit:cover;border-radius:10px">` : '';
+    const linkOpen = r.url ? `<a href="${r.url}" target="_blank" class="muted" style="text-decoration:underline">ouvrir</a>` : '';
+    return `<div class="row" style="align-items:flex-start;gap:10px;padding:10px;border:1px solid #eee;border-radius:14px;margin-bottom:8px">
+      ${img}
+      <div style="flex:1">
+        <div style="font-weight:800">${t}</div>
+        <div class="muted">${r.fnsku} · ${r.asin||'—'} · ${sub} · ${linkOpen}</div>
+      </div>
+    </div>`;
+  }).join('');
+  $('caisseList').innerHTML = `<div class="muted" style="margin-bottom:8px">Caisse <b>${c}</b> — ${rows.length} références</div>` + htmlRows;
+}
+
+
