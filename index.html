@@ -1528,7 +1528,22 @@ function stopScan_(){
 }
 
 /* UI bindings */
-$('btnLookup').onclick = lookupFnsku;
+(function(){
+  const __b=$('btnLookup');
+  if(__b){
+    __b.addEventListener('click', (ev)=>{
+      try{ ev.preventDefault(); ev.stopPropagation(); }catch(_){}
+      Promise.resolve(lookupFnsku()).catch(e=>{
+        console.error(e);
+        setStatus('Erreur recherche: ' + (e && (e.message||e) || e), 'bad');
+      });
+    }, {passive:false});
+    // fallback for some Android taps
+    __b.addEventListener('touchend', (ev)=>{
+      try{ ev.preventDefault(); }catch(_){}
+    }, {passive:false});
+  }
+})();
 $('btnClear').onclick = ()=>{
   $('fnsku').value='';
   $('q').value='';
